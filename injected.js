@@ -291,6 +291,47 @@
     checkUEditor();
   }
 
+  function monitorDialogueState() {
+    if (!window.location.pathname.startsWith('/mooc2-ans-vue/situationalDialogue')) return;
+
+    let boundVm = null;
+    let unwatch = null;
+    const emit = requestId => {
+      const vm = document.querySelector('.chat-page')?.__vue__;
+      const send = () => window.postMessage({
+        type: 'CX_DIALOGUE_STATE',
+        requestId,
+        isSending: document.querySelector('.chat-page')?.__vue__ === vm &&
+          typeof vm?.isSending === 'boolean' && typeof vm.$watch === 'function' ? vm.isSending : null
+      }, '*');
+      if (typeof vm?.$nextTick === 'function') vm.$nextTick(send);
+      else send();
+    };
+    const bind = () => {
+      const vm = document.querySelector('.chat-page')?.__vue__ || null;
+      if (vm === boundVm) return;
+      unwatch?.();
+      boundVm = vm;
+      unwatch = typeof vm?.$watch === 'function' && typeof vm.isSending === 'boolean'
+        ? vm.$watch('isSending', () => emit(null), { immediate: true }) : null;
+      if (!unwatch) emit(null);
+    };
+
+    window.addEventListener('message', event => {
+      if (event.source !== window || event.data?.type !== 'CX_DIALOGUE_STATE_REQUEST') return;
+      bind();
+      emit(event.data.requestId);
+    });
+    const observe = () => {
+      new MutationObserver(bind).observe(document.documentElement, { childList: true, subtree: true });
+      bind();
+    };
+    if (document.documentElement) observe();
+    else document.addEventListener('DOMContentLoaded', observe, { once: true });
+  }
+
+  monitorDialogueState();
+
   // 启动 UEditor 监控
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', monitorUEditor);

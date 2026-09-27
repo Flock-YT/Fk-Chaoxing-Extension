@@ -24,6 +24,11 @@
   background: #d7eee5;
 }
 
+.cx-dialogue-generate:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .cx-dialogue-generate:focus-visible {
   outline: 2px solid #17634f;
   outline-offset: 2px;
@@ -33,6 +38,23 @@
   border-color: #ab6540;
   background: #fff3e9;
   color: #914a25;
+}
+
+.cx-dialogue-effort {
+  border: 1px solid #b9c6c1;
+  border-radius: 4px;
+  background: #fff;
+  color: #243b35;
+  font: inherit;
+  font-size: 13px;
+  height: 30px;
+  max-width: 110px;
+  padding: 2px 6px;
+}
+
+.cx-dialogue-effort:focus-visible {
+  outline: 2px solid #17634f;
+  outline-offset: 2px;
 }
 
 .cx-dialogue-status {
