@@ -59,6 +59,15 @@ const PasteEnabler = {
     } catch (err) {}
   },
 
+  enableSituationalDialoguePaste() {
+    document.addEventListener('paste', event => {
+      if (window.location.pathname !== '/mooc2-ans-vue/situationalDialogue/chat') return;
+      if (!event.target?.matches?.('.chat-page textarea.input-textarea')) return;
+
+      event.stopPropagation();
+    }, true);
+  },
+
   // Handle paste event
   handlePaste(e) {
     try {
@@ -118,6 +127,7 @@ const PasteEnabler = {
     this.injectGlobalStyles();
     this.removeGlobalRestrictions();
     this.enableExistingElements();
+    this.enableSituationalDialoguePaste();
     this.startMutationObserver();
     
     // 仅在顶层窗口输出日志，避免 iframe 重复刷屏
