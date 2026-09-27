@@ -44,12 +44,14 @@
         "modules/ai-answer/api.js",
         "modules/ai-answer/ui.js",
         "modules/ai-answer/core.js",
+        "modules/ai-answer/dialogue.js",
         "modules/ai-answer/index.js",
         "content-message-handler.js",
         "content.js"
       ],
       "css": [
-        "modules/ai-answer/notify.css"
+        "modules/ai-answer/notify.css",
+        "modules/ai-answer/dialogue.css"
       ],
       "run_at": "document_start",
       "all_frames": true

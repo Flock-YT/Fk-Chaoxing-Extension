@@ -9,6 +9,7 @@ const AIAnswerHelper = {
         AIAnswerUI.injectStyles();
         // GlobalLogger.info('AI 答题助手已加载');
       }
+      DialogueAssistant.init();
     } catch (err) {
       GlobalLogger.error('AI 初始化失败');
     }
