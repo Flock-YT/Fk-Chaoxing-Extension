@@ -5,11 +5,40 @@ const AIStream = {
     let text = '';
     let terminal = false;
     let finishReason = '';
+    let contentBuffer = '';
+    let inThink = false;
 
     const append = (delta) => {
       if (typeof delta !== 'string' || !delta) return;
       text += delta;
       onDelta(delta);
+    };
+
+    const suffixLength = (value, marker) => {
+      for (let length = Math.min(value.length, marker.length - 1); length > 0; length--) {
+        if (value.endsWith(marker.slice(0, length))) return length;
+      }
+      return 0;
+    };
+
+    const appendVisibleContent = (content) => {
+      if (typeof content !== 'string' || !content) return;
+      contentBuffer += content;
+      // Hold partial think tags across SSE events so none of their content is forwarded.
+      while (contentBuffer) {
+        const marker = inThink ? '</think>' : '<think>';
+        const index = contentBuffer.indexOf(marker);
+        if (index >= 0) {
+          if (!inThink) append(contentBuffer.slice(0, index));
+          contentBuffer = contentBuffer.slice(index + marker.length);
+          inThink = !inThink;
+          continue;
+        }
+        const keep = suffixLength(contentBuffer, marker);
+        if (!inThink) append(contentBuffer.slice(0, contentBuffer.length - keep));
+        contentBuffer = contentBuffer.slice(contentBuffer.length - keep);
+        break;
+      }
     };
 
     const processEvent = (frame) => {
@@ -44,7 +73,7 @@ const AIStream = {
       } else {
         const choice = event.choices?.[0];
         if (choice?.delta?.refusal) throw new Error(`AI 拒绝回答：${choice.delta.refusal}`);
-        append(choice?.delta?.content);
+        if (!choice?.delta?.reasoning_content) appendVisibleContent(choice?.delta?.content);
         if (choice?.finish_reason) finishReason = choice.finish_reason;
       }
     };
@@ -63,6 +92,8 @@ const AIStream = {
         if (!terminal || (apiType === 'chat_completions' && finishReason !== 'stop')) {
           throw new Error('AI 流式响应未正常完成');
         }
+        if (inThink) throw new Error('AI 思考内容未正常结束');
+        append(contentBuffer);
         if (!text.trim()) throw new Error('AI API 未返回回复文本');
         return text;
       }
