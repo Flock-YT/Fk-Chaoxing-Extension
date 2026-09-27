@@ -3,5 +3,6 @@
 cx-dom/
 
 .idea/
+.DS_Store
 test/
 AGENTS.md
