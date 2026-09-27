@@ -70,7 +70,7 @@ chrome.runtime.onConnect.addListener(port => {
     if (message?.type !== 'start' || started) return;
     started = true;
     controller = new AbortController();
-    streamDialogueReply(port.sender, message.messages, controller, delta => {
+    streamDialogueReply(message.messages, controller, delta => {
       if (!finished) port.postMessage({ type: 'delta', delta });
     }).then(() => complete({ type: 'done' }))
       .catch(error => {
@@ -84,13 +84,7 @@ chrome.runtime.onConnect.addListener(port => {
   });
 });
 
-async function streamDialogueReply(sender, messages, controller, onDelta) {
-  let pageUrl;
-  try { pageUrl = new URL(sender?.url); } catch (err) { /* Invalid sender. */ }
-  if (sender?.frameId !== 0 || pageUrl?.hostname !== 'mooc2-ans.chaoxing.com' ||
-      pageUrl?.pathname !== '/mooc2-ans-vue/situationalDialogue/chat') {
-    throw new Error('只能在 AI 实践情景对话页面生成回复');
-  }
+async function streamDialogueReply(messages, controller, onDelta) {
   if (!Array.isArray(messages) || !messages.length ||
       messages.some(item => !['system', 'user', 'assistant'].includes(item?.role) || typeof item.content !== 'string')) {
     throw new Error('对话内容无效');
