@@ -1,4 +1,5 @@
 importScripts('modules/ai-answer/config.js');
+importScripts('modules/ai-answer/stream.js');
 
 // Background Service Worker - 处理 API 请求和后台任务
 
@@ -46,6 +47,86 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
   }
 });
+
+chrome.runtime.onConnect.addListener(port => {
+  if (port.name !== 'AI_DIALOGUE_STREAM') return;
+  let started = false;
+  let finished = false;
+  let controller;
+
+  const complete = (message) => {
+    if (finished) return;
+    finished = true;
+    try { port.postMessage(message); } catch (err) { /* The page may have closed. */ }
+  };
+
+  port.onMessage.addListener(message => {
+    if (message?.type === 'ping') return;
+    if (message?.type === 'cancel') {
+      controller?.abort();
+      complete({ type: 'cancelled' });
+      return;
+    }
+    if (message?.type !== 'start' || started) return;
+    started = true;
+    controller = new AbortController();
+    streamDialogueReply(message.messages, message.reasoningEffort, controller, delta => {
+      if (!finished) port.postMessage({ type: 'delta', delta });
+    }).then(() => complete({ type: 'done' }))
+      .catch(error => {
+        if (!finished) complete({ type: 'error', message: error.message });
+      });
+  });
+
+  port.onDisconnect.addListener(() => {
+    finished = true;
+    controller?.abort();
+  });
+});
+
+async function streamDialogueReply(messages, reasoningEffort, controller, onDelta) {
+  if (!Array.isArray(messages) || !messages.length ||
+      messages.some(item => !['system', 'user', 'assistant'].includes(item?.role) || typeof item.content !== 'string')) {
+    throw new Error('对话内容无效');
+  }
+  if (!AIConfig.efforts.includes(reasoningEffort)) throw new Error('不支持的思考等级');
+
+  const data = await chrome.storage.local.get(['aiProfiles', 'activeAiProfileId', 'aiConfig']);
+  const profiles = Array.isArray(data.aiProfiles) ? data.aiProfiles : [];
+  const active = profiles.find(item => item.id === data.activeAiProfileId) || profiles[0] || data.aiConfig;
+  if (!active) throw new Error('请先在插件弹窗配置 AI 模型');
+  const config = normalizeApiConfig({ ...active, reasoningEffort });
+  if (!config.baseUrl || !config.apiKey || !config.model) throw new Error('当前 AI 模型配置不完整');
+  const apiUrl = new URL(buildApiUrl(config));
+  if (!['https:', 'http:'].includes(apiUrl.protocol)) throw new Error('AI API 地址必须使用 HTTP 或 HTTPS');
+  if (!await chrome.permissions.contains({ origins: [`${apiUrl.origin}/*`] })) {
+    throw new Error('尚未授权模型 API 域名，请在插件弹窗重新保存或切换模型以授权');
+  }
+
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, 180000);
+  try {
+    const response = await fetch(apiUrl.toString(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.apiKey}`
+      },
+      body: JSON.stringify(buildRequestBody(config, messages, true)),
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(`AI API 请求失败（${response.status}）：${(await response.text()).slice(0, 500)}`);
+    await AIStream.consume(response.body, config.apiType, onDelta);
+  } catch (err) {
+    if (timedOut) throw new Error('AI API 请求超时（180 秒）');
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 function normalizeApiConfig(config = {}) {
   return AIConfig.normalize(config);
@@ -122,8 +203,8 @@ function retryableError(message) {
   return error;
 }
 
-function buildRequestBody(config, messages) {
-  const body = { model: config.model, stream: false };
+function buildRequestBody(config, messages, stream = false) {
+  const body = { model: config.model, stream };
   if (config.apiType === 'responses') {
     body.input = messages;
     body.store = false;

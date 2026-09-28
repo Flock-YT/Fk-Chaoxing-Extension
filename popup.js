@@ -126,11 +126,18 @@ class PopupController {
         activate.className = 'btn btn-outline profile-activate';
         activate.textContent = '使用';
         activate.addEventListener('click', async () => {
-          this.activeAiProfileId = profile.id;
-          await this.persistAiProfiles();
-          this.renderAiProfileList();
-          this.updateAiAnswerButton();
-          this.resetQuickReasoning();
+          activate.disabled = true;
+          try {
+            await this.requestAiHostPermission(profile.baseUrl);
+            this.activeAiProfileId = profile.id;
+            await this.persistAiProfiles();
+            this.renderAiProfileList();
+            this.updateAiAnswerButton();
+            this.resetQuickReasoning();
+          } catch (err) {
+            this.log('error', `切换模型失败：${err.message}`);
+            activate.disabled = false;
+          }
         });
         row.appendChild(activate);
       }
@@ -228,6 +235,7 @@ class PopupController {
     try {
       const profile = this.readAiProfileForm();
       this.validateAiProfile(profile);
+      await this.requestAiHostPermission(profile.baseUrl);
       const index = this.aiProfiles.findIndex(item => item.id === profile.id);
       if (index < 0) this.aiProfiles.push(profile);
       else this.aiProfiles[index] = profile;
