@@ -49,7 +49,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 chrome.runtime.onConnect.addListener(port => {
-  if (port.name !== 'AI_DIALOGUE_STREAM') return;
+  if (!['AI_DIALOGUE_STREAM', 'AI_CHAT_STREAM'].includes(port.name)) return;
   let started = false;
   let finished = false;
   let controller;
@@ -72,7 +72,10 @@ chrome.runtime.onConnect.addListener(port => {
     controller = new AbortController();
     streamDialogueReply(message.messages, message.reasoningEffort, controller, delta => {
       if (!finished) port.postMessage({ type: 'delta', delta });
-    }).then(() => complete({ type: 'done' }))
+    }, port.name === 'AI_CHAT_STREAM' ? delta => {
+      if (!finished) port.postMessage({ type: 'thought', delta });
+    } : undefined, port.name === 'AI_CHAT_STREAM' ? message.profileId : undefined)
+      .then(() => complete({ type: 'done' }))
       .catch(error => {
         if (!finished) complete({ type: 'error', message: error.message });
       });
@@ -84,16 +87,19 @@ chrome.runtime.onConnect.addListener(port => {
   });
 });
 
-async function streamDialogueReply(messages, reasoningEffort, controller, onDelta) {
+async function streamDialogueReply(messages, reasoningEffort, controller, onDelta, onThought, profileId) {
   if (!Array.isArray(messages) || !messages.length ||
-      messages.some(item => !['system', 'user', 'assistant'].includes(item?.role) || typeof item.content !== 'string')) {
+      messages.some(item => !['system', 'user', 'assistant'].includes(item?.role) || !validMessageContent(item))) {
     throw new Error('对话内容无效');
   }
   if (!AIConfig.efforts.includes(reasoningEffort)) throw new Error('不支持的思考等级');
 
   const data = await chrome.storage.local.get(['aiProfiles', 'activeAiProfileId', 'aiConfig']);
   const profiles = Array.isArray(data.aiProfiles) ? data.aiProfiles : [];
-  const active = profiles.find(item => item.id === data.activeAiProfileId) || profiles[0] || data.aiConfig;
+  const active = profileId
+    ? profiles.find(item => item.id === profileId)
+    : profiles.find(item => item.id === data.activeAiProfileId) || profiles[0] || data.aiConfig;
+  if (profileId && !active) throw new Error('所选模型配置已删除，请重新选择');
   if (!active) throw new Error('请先在插件弹窗配置 AI 模型');
   const config = normalizeApiConfig({ ...active, reasoningEffort });
   if (!config.baseUrl || !config.apiKey || !config.model) throw new Error('当前 AI 模型配置不完整');
@@ -119,7 +125,7 @@ async function streamDialogueReply(messages, reasoningEffort, controller, onDelt
       signal: controller.signal
     });
     if (!response.ok) throw new Error(`AI API 请求失败（${response.status}）：${(await response.text()).slice(0, 500)}`);
-    await AIStream.consume(response.body, config.apiType, onDelta);
+    await AIStream.consume(response.body, config.apiType, onDelta, onThought);
   } catch (err) {
     if (timedOut) throw new Error('AI API 请求超时（180 秒）');
     throw err;
@@ -203,10 +209,21 @@ function retryableError(message) {
   return error;
 }
 
+function validMessageContent(message) {
+  if (typeof message.content === 'string') return true;
+  return message.role === 'user' && Array.isArray(message.content) && message.content.length > 0 && message.content.every(part =>
+    (part?.type === 'text' && typeof part.text === 'string') ||
+    (part?.type === 'image_url' && typeof part.image_url?.url === 'string' &&
+      (/^https?:\/\//i.test(part.image_url.url) || /^data:image\/(png|jpe?g|gif|webp);base64,/i.test(part.image_url.url))));
+}
+
 function buildRequestBody(config, messages, stream = false) {
   const body = { model: config.model, stream };
   if (config.apiType === 'responses') {
-    body.input = messages;
+    body.input = messages.map(message => ({ ...message, content: Array.isArray(message.content)
+      ? message.content.map(part => part.type === 'image_url'
+        ? { type: 'input_image', image_url: part.image_url.url }
+        : { type: 'input_text', text: part.text }) : message.content }));
     body.store = false;
     if (config.reasoningEffort) body.reasoning = { effort: config.reasoningEffort };
   } else {

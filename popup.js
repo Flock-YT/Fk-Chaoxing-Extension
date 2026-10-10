@@ -21,6 +21,8 @@ class PopupController {
     this.aiTemperature = document.getElementById('ai-temperature');
     this.aiApiType = document.getElementById('ai-api-type');
     this.aiReasoningEffort = document.getElementById('ai-reasoning-effort');
+    this.aiSystemPrompt = document.getElementById('ai-system-prompt');
+    this.aiUserPrompt = document.getElementById('ai-user-prompt');
     this.aiProfiles = [];
     this.activeAiProfileId = null;
     this.editorId = null;
@@ -55,7 +57,8 @@ class PopupController {
 
   getDefaultAiProfile() {
     return { id: '', name: '', baseUrl: '', path: '/chat/completions', apiKey: '', model: '',
-      apiType: 'chat_completions', reasoningEffort: '', temperature: 0.3 };
+      apiType: 'chat_completions', reasoningEffort: '', temperature: 0.3,
+      systemPrompt: AIConfig.defaultSystemPrompt, userPrompt: AIConfig.defaultUserPrompt };
   }
 
   normalizeAiProfile(profile = {}) {
@@ -181,7 +184,8 @@ class PopupController {
   formState() {
     return { name: this.aiProfileName.value, baseUrl: this.aiBaseUrl.value, apiKey: this.aiApiKey.value,
       model: this.aiModelId.value, path: this.aiApiPath.value, apiType: this.aiApiType.value,
-      reasoningEffort: this.aiReasoningEffort.value, temperature: this.aiTemperature.value };
+      reasoningEffort: this.aiReasoningEffort.value, temperature: this.aiTemperature.value,
+      systemPrompt: this.aiSystemPrompt.value, userPrompt: this.aiUserPrompt.value };
   }
 
   openEditor(profile = null, draft = null) {
@@ -195,6 +199,8 @@ class PopupController {
     this.aiApiPath.value = data.path || AIConfig.defaultPath(data.apiType);
     this.aiReasoningEffort.value = data.reasoningEffort || '';
     this.aiTemperature.value = data.temperature ?? '';
+    this.aiSystemPrompt.value = data.systemPrompt ?? AIConfig.defaultSystemPrompt;
+    this.aiUserPrompt.value = data.userPrompt ?? AIConfig.defaultUserPrompt;
     this.aiApiKey.type = 'password';
     document.getElementById('btn-key-visibility').title = '显示密钥';
     document.getElementById('btn-key-visibility').setAttribute('aria-label', '显示密钥');
@@ -388,9 +394,10 @@ class PopupController {
         reasoningEffort: this.aiQuickReasoning.value || profile.reasoningEffort });
       this.validateAiProfile(config);
       await this.requestAiHostPermission(config.baseUrl);
-      const response = await chrome.tabs.sendMessage(this.currentTab.id, { action: 'aiAnswer', config });
+      const response = await chrome.tabs.sendMessage(this.currentTab.id,
+        { action: 'openAiChat', reasoningEffort: config.reasoningEffort }, { frameId: 0 });
       if (!response?.success) throw new Error(response?.message || '启动答题任务失败');
-      this.log('info', '答题任务已启动，进度请查看页面悬浮面板');
+      this.log('info', '已打开页面内 AI 对话窗');
     } catch (err) {
       this.log('error', `AI 答题失败：${err.message}`);
     } finally {
@@ -456,6 +463,16 @@ class PopupController {
     on('btn-ai-config-save', 'click', () => this.saveAiProfile());
     on('btn-ai-config-delete', 'click', () => this.deleteAiProfile());
     on('btn-ai-config-test', 'click', () => this.testAiConnection());
+    on('btn-prompt-reset', 'click', () => {
+      this.aiSystemPrompt.value = AIConfig.defaultSystemPrompt;
+      this.aiUserPrompt.value = AIConfig.defaultUserPrompt;
+      document.getElementById('prompt-preview').hidden = true;
+    });
+    on('btn-prompt-preview', 'click', () => {
+      const preview = document.getElementById('prompt-preview');
+      preview.textContent = `System: ${AIConfig.buildSystemPrompt(this.aiSystemPrompt.value)}\n\nUser: [所选题目与答题区现有内容]\n${this.aiUserPrompt.value}\n[本轮输入]`;
+      preview.hidden = false;
+    });
     on('btn-key-visibility', 'click', event => {
       const visible = this.aiApiKey.type === 'password';
       this.aiApiKey.type = visible ? 'text' : 'password';

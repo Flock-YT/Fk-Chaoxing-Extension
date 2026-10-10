@@ -1,6 +1,8 @@
 // AI 答题助手核心逻辑
 const AIAnswerCore = {
   isProcessing: false,
+  questionIds: new WeakMap(),
+  nextQuestionId: 1,
 
   async processAllQuestions(requestConfig) {
     if (this.isProcessing) {
@@ -14,7 +16,8 @@ const AIAnswerCore = {
       AINotify.info('开始扫描题目与可写入编辑器...');
       GlobalLogger.info('AI 开始分析题目...');
 
-      const questions = await this.collectQuestions();
+      const questions = typeof AIChat !== 'undefined' && AIChat.root && AIChat.questions.length
+        ? AIChat.questions : await this.collectQuestions();
       if (questions.length === 0) {
         throw new Error('未找到任何题目');
       }
@@ -161,6 +164,7 @@ const AIAnswerCore = {
   },
 
   parseQuestionContainer(container, docRef, sectionHeader) {
+    if (!this.questionIds.has(container)) this.questionIds.set(container, `q${this.nextQuestionId++}`);
     const fillTargets = this.extractFillTargets(container);
     const shortAnswerTargets = fillTargets.length === 0 ? this.extractShortAnswerTargets(container) : [];
     const dropdown = DropdownQuestions.extract(container);
@@ -172,15 +176,32 @@ const AIAnswerCore = {
       return null;
     }
 
+    const programTarget = type === 'programming' ? this.findProgramTarget(container, [...shortAnswerTargets, ...fillTargets]) : null;
+    const readContent = programTarget ? this.readProgramContent(programTarget) : null;
+    const answerDraft = readContent ?? '';
+    const choiceTargets = this.extractChoiceTargets(container);
+    const existingAnswer = type === 'programming' ? answerDraft :
+      type === 'fill_blank' ? fillTargets.map(target => this.readExistingEditor(target)) :
+      type === 'short_answer' ? shortAnswerTargets.map(target => this.readExistingEditor(target)) :
+      type === 'sorting' || type === 'matching' ? DropdownQuestions.getTargets(container, type)
+        .map(target => target.select?.value ?? this.normalizeText(target.span?.textContent || '')) :
+      choiceTargets.filter(target => target.input?.checked || target.marker?.classList.contains(target.selectedClass))
+        .map(target => target.letter);
     return {
+      id: this.questionIds.get(container),
       title,
       sectionHeader,
+      ...QuestionContainers.describe(container),
       type,
       blankCount: fillTargets.length,
       options,
       fillTargets,
       shortAnswerTargets,
-      choiceTargets: this.extractChoiceTargets(container),
+      programTarget,
+      answerDraft,
+      existingAnswer,
+      codeStatus: type === 'programming' ? (readContent !== null ? 'read' : 'unavailable') : undefined,
+      choiceTargets,
       ...(dropdown || {}),
       container,
       docRef
@@ -191,10 +212,15 @@ const AIAnswerCore = {
     const dropdownType = DropdownQuestions.detectType(container);
     if (dropdownType) return dropdownType;
     const typeText = this.normalizeText(
-      container.getAttribute('typename') ||
-      container.querySelector('.newZy_TItle, .newZy_Title, .colorShallow')?.textContent ||
-      ''
+      QuestionContainers.typeLabel(container)
     );
+
+    const answerCode = container.querySelector('.stem_answer pre, .Answer pre, .stem_answer code, .Answer code, .stem_answer textarea, .Answer textarea');
+    const source = answerCode?.value || answerCode?.textContent || '';
+    if (/程序|编程|代码/.test(typeText) || container.querySelector('.CodeMirror, .cm-editor, .monaco-editor') ||
+        /#\s*include\s*<|\bint\s+main\s*\(|\bpublic\s+static\s+void\s+main\s*\(|\bdef\s+\w+\s*\(/.test(source)) {
+      return 'programming';
+    }
 
     if (fillTargets.length > 0 || typeText.includes('填空')) {
       return 'fill_blank';
@@ -228,35 +254,97 @@ const AIAnswerCore = {
   },
 
   extractQuestionTitle(container) {
-    const titleRoot = container.querySelector('.Zy_TItle .fontLabel, .Zy_Title .fontLabel, .newZy_TItle .fontLabel, .newZy_Title .fontLabel')
-      || container.querySelector('.Zy_TItle, .Zy_Title, .newZy_TItle, .newZy_Title, h3.mark_name, h3, .fontLabel');
+    return QuestionContainers.describe(container).title;
+  },
 
-    const clone = titleRoot ? titleRoot.cloneNode(true) : null;
-    if (!clone) {
-      return '';
+  findProgramTarget(container, shortAnswerTargets = []) {
+    const editor = container.querySelector('.CodeMirror, .cm-editor, .monaco-editor');
+    if (editor) return { kind: 'code', element: editor, container };
+    const target = shortAnswerTargets[0];
+    if (target) return { kind: 'rich', ...target, container };
+    const textarea = container.querySelector('.stem_answer textarea, .Answer textarea');
+    if (textarea) return { kind: 'text', textarea, container };
+    const pre = container.querySelector('.stem_answer pre, .Answer pre, .stem_answer code, .Answer code');
+    if (pre) return { kind: 'pre', element: pre, container };
+    return null;
+  },
+
+  readProgramContent(target) {
+    if (!target) return null;
+    if (target.kind === 'code') {
+      const element = target.element;
+      delete element.dataset.cxCodeValue;
+      element.dispatchEvent(new Event('CX_CODE_EDITOR_READ', { bubbles: true }));
+      const value = element.dataset.cxCodeValue;
+      delete element.dataset.cxCodeValue;
+      return value ?? null;
     }
+    if (target.kind === 'pre') return target.element.textContent || '';
+    if (target.kind === 'text') return target.textarea.value || '';
+    let body;
+    try { body = target.iframe?.contentDocument?.body; } catch (_) { body = null; }
+    if (body) return this.readCodeText(body);
+    const value = target.textarea?.value || '';
+    if (/<(?:p|div|br|pre)\b/i.test(value)) {
+      const parsed = new DOMParser().parseFromString(value, 'text/html');
+      return this.readCodeText(parsed.body);
+    }
+    return value;
+  },
 
-    clone.querySelectorAll('script, style').forEach(node => node.remove());
-    const text = this.normalizeText(clone.textContent || '');
-    return text.replace(/^\d+\s*/, '').trim();
+  readCodeText(root) {
+    if (root.children.length === 1 && root.firstElementChild.tagName === 'PRE') {
+      return root.firstElementChild.textContent || '';
+    }
+    const clone = root.cloneNode(true);
+    clone.querySelectorAll('br').forEach(node => node.replaceWith('\n'));
+    clone.querySelectorAll('p, div').forEach(node => node.append('\n'));
+    return clone.textContent.replace(/\n$/, '');
+  },
+
+  readExistingEditor(target) {
+    let body;
+    try { body = target.iframe?.contentDocument?.body; } catch (_) { body = null; }
+    if (body) return this.readCodeText(body);
+    return target.textarea?.value || target.inputDiv?.textContent || '';
+  },
+
+  writeProgramContent(target, value) {
+    if (typeof value !== 'string' || !value.trim()) return false;
+    if (target.kind === 'code') {
+      const element = target.element;
+      element.dataset.cxCodeWrite = value;
+      delete element.dataset.cxCodeWritten;
+      element.dispatchEvent(new Event('CX_CODE_EDITOR_WRITE', { bubbles: true }));
+      const written = element.dataset.cxCodeWritten === 'true';
+      delete element.dataset.cxCodeWrite;
+      delete element.dataset.cxCodeWritten;
+      if (!written) throw new Error('此代码编辑器暂不支持安全写入，请手动复制答案');
+      return true;
+    }
+    if (target.kind === 'pre') throw new Error('答题区代码不可编辑，请手动复制答案');
+    if (target.kind === 'text') {
+      target.textarea.value = value;
+      this.dispatchChoiceEvents(target.textarea);
+      return true;
+    }
+    const html = `<pre style="white-space:pre-wrap">${this.escapeHtml(value)}</pre>`;
+    const ue = this.getUeEditorInstance(target.textarea?.id);
+    if (ue?.setContent) ue.setContent(html, false);
+    if (target.iframe?.contentDocument?.body) target.iframe.contentDocument.body.innerHTML = html;
+    if (target.textarea) {
+      target.textarea.value = html;
+      this.dispatchChoiceEvents(target.textarea);
+    }
+    return Boolean(ue || target.iframe || target.textarea);
   },
 
   extractOptions(container) {
-    const optionNodes = Array.from(container.querySelectorAll('.stem_answer .answerBg, ul.Zy_ulTop li, .Zy_ulTop li'));
-    const options = [];
-
-    optionNodes.forEach((node, index) => {
-      const letter = String.fromCharCode(65 + index);
-      const text = this.normalizeText(node.textContent || '');
-      if (text) {
-        options.push(`${letter}. ${text.replace(/^[A-Z][.、]\s*/, '')}`);
-      }
-    });
-
-    return options;
+    return QuestionContainers.options(container);
   },
 
   extractFillTargets(container) {
+    if (/简答|程序|编程|代码/.test(QuestionContainers.typeLabel(container))) return [];
     // 传统填空题结构
     const traditionalTargets = Array.from(container.querySelectorAll('.clearfix .Zy_ulTk .blankItemDiv, .blankItemDiv'))
       .map((blankItem, blankIndex) => this.createEditorTarget(blankItem, blankIndex))
@@ -273,7 +361,7 @@ const AIAnswerCore = {
         // 查找UEditor编辑器
         const textarea = answerDiv.querySelector('textarea[id^="answerEditor"]');
         const editorRoot = answerDiv.querySelector('.edui-editor') || answerDiv;
-        const iframe = answerDiv.querySelector('iframe[id^="ueditor_"]');
+        const iframe = answerDiv.querySelector('iframe[id^="ueditor"]');
         
         if (!textarea && !iframe) {
           return null;
@@ -310,7 +398,7 @@ const AIAnswerCore = {
     }
 
     const textarea = forcedTextarea || root.querySelector('textarea[id^="answerEditor"], textarea[id^="answer"]:not([id^="answertype"])');
-    const iframe = root.querySelector('[id$="_iframeholder"] iframe, iframe[id^="ueditor_"]');
+    const iframe = root.querySelector('[id$="_iframeholder"] iframe, iframe[id^="ueditor"]');
     const inputDiv = root.querySelector('.InpDIV');
 
     if (!textarea && !iframe && !inputDiv) {
@@ -328,7 +416,7 @@ const AIAnswerCore = {
   },
 
   extractChoiceTargets(container) {
-    const items = Array.from(container.querySelectorAll('ul.Zy_ulTop li, .stem_answer li, .stem_answer .answerBg'));
+    const items = Array.from(container.querySelectorAll('ul.Zy_ulTop li, .stem_answer li, .stem_answer .answerBg, .stem_answer2 .answerBg'));
     return items.map((item, index) => {
       const fallbackLetter = String.fromCharCode(65 + index);
       const marker = item.querySelector('.num_option, span[data]');
@@ -367,7 +455,9 @@ const AIAnswerCore = {
       const answer = answers[index];
       try {
         if (answer?.error) throw new Error(answer.error);
-        const applied = await this.applyAnswerToQuestion(question, answer);
+        const applied = question.remote
+          ? await AIChat.applyRemote(question, AIChat.snapshot(question), answer).then(() => true)
+          : await this.applyAnswerToQuestion(question, answer);
         if (applied) {
           appliedCount += 1;
         } else {
@@ -386,6 +476,27 @@ const AIAnswerCore = {
   async applyAnswerToQuestion(question, answer) {
     if (!question || !answer) {
       return false;
+    }
+
+    if (!question.container?.isConnected) throw new Error('题目已变化，请刷新题目列表');
+    if (question.docRef) {
+      const current = this.parseQuestionContainer(question.container, question.docRef, question.sectionHeader);
+      if (!current || current.id !== question.id || current.title !== question.title || !QuestionContainers.sameContext(current, question) ||
+          current.type !== question.type || JSON.stringify(current.options) !== JSON.stringify(question.options) ||
+          JSON.stringify(current.existingAnswer) !== JSON.stringify(question.existingAnswer)) {
+        throw new Error('题目内容已变化，请刷新题目列表');
+      }
+    }
+    if (question.editorState !== undefined && typeof AIChat !== 'undefined' &&
+        AIChat.editorState(question) !== question.editorState) {
+      throw new Error('答题区内容已变化，已拒绝覆盖');
+    }
+    if (question.type === 'programming') {
+      const current = this.readProgramContent(question.programTarget);
+      if (!question.programTarget || current !== question.answerDraft) {
+        throw new Error('答题区代码已变化或无法读取，已拒绝覆盖');
+      }
+      return this.writeProgramContent(question.programTarget, answer.answer);
     }
 
     switch (question.type) {
@@ -421,6 +532,9 @@ const AIAnswerCore = {
     if (!sorting && (new Set(targets.map(target => target.left)).size !== expectedCount ||
         targets.some(target => !question.matchingGroups.left.some(item => item.id === target.left)))) {
       throw new Error('连线题显示编号与答题控件无法对应');
+    }
+    if (!sorting && targets.every(target => target.select)) {
+      return this.applyNativeMatchingAnswer(question, answer, targets, hidden, qid);
     }
 
     // Resolve every choice before clicking anything, including shuffled internal IDs.
@@ -466,6 +580,44 @@ const AIAnswerCore = {
         throw new Error('连线配对与答案字段不一致，请检查页面');
       }
     }
+    return true;
+  },
+
+  applyNativeMatchingAnswer(question, answer, targets, hidden, qid) {
+    // Legacy chapter homework uses native selects decorated with Chosen.
+    // Its submit serializer reads select's value attribute and lineOption's index.
+    const choices = targets.map(target => {
+      const label = answer.pairs.find(pair => pair.left === target.left)?.right;
+      const matches = Array.from(target.select.options).filter(option => DropdownQuestions.text(option.textContent) === label);
+      if (matches.length !== 1 || !/^\d+$/.test(target.name || '')) throw new Error('连线下拉选项或内部编号无效');
+      const option = matches[0];
+      const chosen = target.box.querySelector('.chosen-container');
+      if (chosen && !chosen.querySelector('.chosen-single')) throw new Error('连线下拉控件未准备好，请刷新题目');
+      if (target.select.disabled || option.disabled) throw new Error('连线选项不可写入');
+      return { ...target, option, chosen, label };
+    });
+    if (new Set(choices.map(choice => choice.name)).size !== choices.length) throw new Error('连线控件内部编号重复');
+    for (const choice of choices) {
+      if (choice.chosen) {
+        // Use Chosen's original handler to keep the native select and visible UI in sync.
+        choice.box.querySelector('.chosen-single')?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        // Chosen builds its results lazily on opening and selects the highlighted row.
+        const item = choice.chosen.querySelector(`.chosen-results li[data-option-array-index="${choice.option.index}"]`);
+        if (!item) throw new Error('连线下拉选项未加载，请刷新题目');
+        item.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        item.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+      } else {
+        choice.select.value = choice.option.value;
+      }
+      if (choice.select.value !== choice.option.value) throw new Error('连线下拉框未更新，请重新尝试');
+      choice.select.setAttribute('value', choice.option.value);
+      this.dispatchChoiceEvents(choice.select);
+    }
+    hidden.value = JSON.stringify(choices.map(choice => ({ name: choice.name, content: choice.option.value }))
+      .sort((a, b) => Number(a.name) - Number(b.name)));
+    const typeInput = question.container.querySelector(`#answertype${qid}`);
+    if (typeInput) typeInput.value = '11';
+    this.dispatchChoiceEvents(hidden);
     return true;
   },
 

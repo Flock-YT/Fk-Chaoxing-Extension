@@ -205,6 +205,19 @@
           </div>
         </div>
         <p class="settings-caption">设置思考等级时不发送温度参数。保存不会调用模型；测试连接可能产生费用。</p>
+        <div class="form-group">
+          <label for="ai-system-prompt">系统提示词</label>
+          <textarea id="ai-system-prompt" class="form-control" rows="4"></textarea>
+        </div>
+        <div class="form-group">
+          <label for="ai-user-prompt">用户提示词</label>
+          <textarea id="ai-user-prompt" class="form-control" rows="4"></textarea>
+        </div>
+        <div class="inline-row">
+          <button id="btn-prompt-reset" class="btn btn-outline" type="button">恢复默认提示词</button>
+          <button id="btn-prompt-preview" class="btn btn-outline" type="button">预览提示词模板</button>
+        </div>
+        <pre id="prompt-preview" class="settings-caption" hidden></pre>
         <p id="model-editor-error" class="field-error" role="alert" hidden></p>
         <p id="model-editor-status" class="field-status" role="status" hidden></p>
       </div>

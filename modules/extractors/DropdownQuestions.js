@@ -5,19 +5,19 @@ const DropdownQuestions = {
   },
 
   detectType(container) {
-    const label = container.getAttribute('typename') || container.querySelector('h3 .colorShallow')?.textContent || '';
+    const label = QuestionContainers.typeLabel(container);
     if (label.includes('排序') || container.querySelector('.selectBox li[qtype="13"]')) return 'sorting';
-    if (label.includes('连线') || container.querySelector('.selectBox li[qtype="11"]')) return 'matching';
+    if (label.includes('连线') || container.querySelector('.selectBox li[qtype="11"], .matching .firstUlList, [id^="connLine_"]')) return 'matching';
     return null;
   },
 
   readItems(nodes) {
     return Array.from(nodes).map(node => {
-      const label = node.querySelector(':scope > span');
+      const label = node.querySelector(':scope > span, :scope > i');
       const id = this.text(label?.textContent).replace(/[.、．。]$/, '').trim();
       const clone = node.cloneNode(true);
-      clone.querySelector(':scope > span')?.remove();
-      return { id, text: this.text(clone.textContent) };
+      clone.querySelector(':scope > span, :scope > i')?.remove();
+      return { id, text: QuestionContainers.text(clone) };
     }).filter(item => item.id && item.text);
   },
 
@@ -28,14 +28,21 @@ const DropdownQuestions = {
       return { type, options: items.map(item => `${item.id}. ${item.text}`), sortingLabels: items.map(item => item.id) };
     }
     if (type === 'matching') {
-      const left = this.readItems(container.querySelectorAll('.line_wid_400.fl .lineCt'));
-      const right = this.readItems(container.querySelectorAll('.line_wid_400.fr .lineCt'));
+      const left = this.readItems(container.querySelectorAll('.line_wid_400.fl .lineCt, .firstUlList > li:not(.groupTitile)'));
+      const right = this.readItems(container.querySelectorAll('.line_wid_400.fr .lineCt, .secondUlList > li:not(.groupTitile)'));
       return { type, options: [], matchingGroups: { left, right } };
     }
     return null;
   },
 
   getTargets(container, type) {
+    if (type === 'matching' && container.querySelector('.thirdUlList select')) {
+      return Array.from(container.querySelectorAll('.thirdUlList .lineOption')).map(row => ({
+        box: row, select: row.querySelector('select'),
+        left: this.text(row.querySelector('.matchNum')?.textContent).replace(/[.、．。]$/, '').trim(),
+        name: row.getAttribute('index')
+      }));
+    }
     const selector = type === 'sorting' ? '.selectBox.order_box' : '.line_answer_ct .selectBox';
     return Array.from(container.querySelectorAll(selector)).map(box => ({
       box,

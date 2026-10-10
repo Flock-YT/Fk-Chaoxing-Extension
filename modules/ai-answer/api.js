@@ -9,14 +9,20 @@ const AIApi = {
     model: ''
   },
 
-  buildPrompt(questions) {
+  buildPrompt(questions, relatedOnly = false) {
     const payload = {
       questions: questions.map((question, index) => ({
         questionIndex: index + 1,
         type: question.type,
         title: question.title,
+        parentTitle: question.parentTitle || '',
+        subquestionId: question.subquestionId || '',
+        subquestionNumber: question.subquestionNumber || '',
+        images: [...(question.parentImages || []), ...(question.images || [])],
         blankCount: question.blankCount || 0,
         options: Array.isArray(question.options) ? question.options : [],
+        existingAnswer: question.existingAnswer ?? null,
+        ...(question.type === 'programming' ? { answerDraft: question.answerDraft || '', codeStatus: question.codeStatus || 'unavailable' } : {}),
         ...(question.type === 'matching' ? { matchingGroups: question.matchingGroups } : {})
       }))
     };
@@ -41,13 +47,36 @@ const AIApi = {
       '- `single_choice` 必须返回 `answer` 字段，只能是单个大写选项字母，例如 A。',
       '- `multiple_choice` 必须返回 `answers` 数组，数组元素必须是大写选项字母。',
       '- `short_answer` 必须返回 `answer` 字段，内容简洁直接，不要带题号。',
+      '- `programming` 必须返回 `answer` 字段，内容为完整纯文本代码，保留原代码的注释和适合课程的解题步骤。',
+      '- 程序题 `codeStatus` 为 `unavailable` 表示未读取到答题区代码，不可声称已经看到注释。',
       '- `sorting` 必须返回 `answers` 数组，按题目要求从左到右排列全部选项字母，每个选项恰好一次，禁止按字母重新排序。',
       '- `matching` 必须返回 `pairs` 数组，left 使用第1组的显示编号，right 使用第2组的显示字母；每个左侧项目恰好一次，右侧选项可重复。',
-      '- 如果无法确定，请尽量给出最可能答案，但仍然必须遵守 JSON 结构。',
+      relatedOnly
+        ? '- 只提取本轮用户提问和助手回复中明确解答的题目；不要根据题干自行推断或补全答案。'
+        : '- 如果无法确定，请尽量给出最可能答案，但仍然必须遵守 JSON 结构。',
+      ...(relatedOnly ? [
+        '- 如果回复与题目无关，返回 {"related":false}。',
+        '- 如果回复解答了部分题目，返回 {"related":true,"answers":[...]}，只列出已解答题目，questionIndex 按下面题目数据中的序号。'
+      ] : []),
       '',
       '题目数据如下：',
       JSON.stringify(payload, null, 2)
     ].join('\n');
+  },
+
+  withImages(text, questions = []) {
+    const content = [{ type: 'text', text }];
+    const seen = new Set();
+    questions.forEach((question, index) => {
+      [...(question.parentImages || []), ...(question.images || [])].forEach(image => {
+        if (!image?.url || seen.has(image.url)) return;
+        if (!/^https?:\/\//i.test(image.url) && !/^data:image\/(png|jpe?g|gif|webp);base64,/i.test(image.url)) return;
+        seen.add(image.url);
+        content.push({ type: 'text', text: `第 ${question.index || index + 1} 题引用图片：${image.alt || '题目图片'}（相同 URL 的图片可供其他子题共同引用）` });
+        content.push({ type: 'image_url', image_url: { url: image.url } });
+      });
+    });
+    return content.length > 1 ? content : text;
   },
 
   normalizeConfig(config = {}) {
@@ -73,9 +102,9 @@ const AIApi = {
     }
   },
 
-  async getAnswers(questions, requestConfig) {
-    const prompt = this.buildPrompt(questions);
+  async getAnswers(questions, requestConfig, conversationReply = '', relatedOnly = false) {
     const config = requestConfig ? this.normalizeConfig(requestConfig) : await this.loadConfig();
+    const prompt = `${this.buildPrompt(questions, relatedOnly)}\n\n用户提示词：\n${config.userPrompt}${conversationReply ? `\n\n${conversationReply}` : ''}`;
     this.validateConfig(config);
 
     return new Promise((resolve, reject) => {
@@ -86,11 +115,11 @@ const AIApi = {
           messages: [
             {
               role: 'system',
-              content: '你是一个专业的超星答题助手。你必须严格返回 JSON 对象，禁止输出代码块、解释、前后缀文本。'
+              content: AIConfig.buildSystemPrompt(config.systemPrompt, { structured: true, relatedOnly })
             },
             {
               role: 'user',
-              content: prompt
+              content: this.withImages(prompt, questions)
             }
           ]
         }
@@ -173,6 +202,8 @@ const AIApi = {
         return { ...base, answer };
       }
 
+      case 'programming':
+        return { ...base, answer: String(entry.answer ?? entry.answers?.[0] ?? '') };
       case 'short_answer':
       default:
         return {

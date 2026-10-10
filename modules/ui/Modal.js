@@ -22,7 +22,8 @@ const CXModal = {
           </div>
           
           <div style="padding:24px;flex-grow:1;display:flex;flex-direction:column;overflow:hidden;">
-            <textarea id="cx-copy-modal-textarea" style="width:100%;flex-grow:1;min-height:450px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:16px;font-size:14px;color:#374151;line-height:1.6;resize:none;outline:none;box-sizing:border-box;font-family:${monoFamily};transition:border-color 0.2s;" onfocus="this.style.borderColor='#d1d5db'" onblur="this.style.borderColor='#e5e7eb'"></textarea>
+            <textarea id="cx-copy-modal-textarea" aria-label="可复制的题目文本及图片链接" style="width:100%;flex-grow:1;min-height:180px;height:450px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:16px;font-size:14px;color:#374151;line-height:1.6;resize:none;outline:none;box-sizing:border-box;font-family:${monoFamily};transition:border-color 0.2s;" onfocus="this.style.borderColor='#d1d5db'" onblur="this.style.borderColor='#e5e7eb'"></textarea>
+            <details id="cx-copy-modal-images" hidden style="margin-top:16px;max-height:30vh;overflow:auto;flex-shrink:0;"><summary style="cursor:pointer;font-size:14px;">题目图片预览（复制内容包含图片链接）</summary><div id="cx-copy-modal-image-list"></div></details>
           </div>
           
           <div style="display:flex;justify-content:flex-end;align-items:center;gap:12px;padding:16px 24px;border-top:1px solid #f3f4f6;background:#fafafa;">
@@ -85,8 +86,32 @@ const CXModal = {
     
     if (textarea) {
       textarea.value = content;
+      this.showImages(content);
       overlay.style.display = 'flex';
     }
+  },
+
+  showImages(content) {
+    const panel = document.getElementById('cx-copy-modal-images');
+    const list = document.getElementById('cx-copy-modal-image-list');
+    list.replaceChildren();
+    const urls = new Set(Array.from(String(content).matchAll(/!\[题目图片\]\(<([^>]+)>\)/g), match => match[1]));
+    urls.forEach(url => {
+      if (!/^https?:\/\//i.test(url) && !/^data:image\/(png|jpe?g|gif|webp);base64,/i.test(url)) return;
+      const figure = document.createElement('figure');
+      figure.style.margin = '16px 0';
+      const image = document.createElement('img');
+      image.alt = '题目图片'; image.loading = 'lazy';
+      image.style.cssText = 'max-width:100%;height:auto;display:block;';
+      const link = document.createElement('a');
+      link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+      link.textContent = '查看原图';
+      image.onerror = () => { image.hidden = true; link.textContent = '图片无法预览，点击查看原图'; };
+      image.src = url;
+      figure.append(image, link); list.append(figure);
+    });
+    panel.hidden = !list.childElementCount;
+    panel.open = Boolean(list.childElementCount);
   },
 
   // Hide the modal
