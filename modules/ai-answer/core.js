@@ -359,7 +359,7 @@ const AIAnswerCore = {
     if (answerContainers.length > 0) {
       return Array.from(answerContainers).map((answerDiv, index) => {
         // 查找UEditor编辑器
-        const textarea = answerDiv.querySelector('textarea[id^="answerEditor"]');
+        const textarea = answerDiv.querySelector('textarea[id^="answerEditor"], textarea');
         const editorRoot = answerDiv.querySelector('.edui-editor') || answerDiv;
         const iframe = answerDiv.querySelector('iframe[id^="ueditor"]');
         
@@ -382,14 +382,10 @@ const AIAnswerCore = {
   },
 
   extractShortAnswerTargets(container) {
-    const targets = Array.from(container.querySelectorAll('textarea[id^="answerEditor"], textarea[id^="answer"]:not([id^="answertype"])'))
-      .map((textarea, index) => {
-        const editorRoot = textarea.closest('.edui-editor') || textarea.parentElement;
-        return this.createEditorTarget(editorRoot || textarea.parentElement || container, index, textarea);
-      })
-      .filter(Boolean);
-
-    return targets.filter(target => !target.blankItemDiv);
+    const nodes = Array.from(container.querySelectorAll('textarea[id^="answerEditor"], textarea[id^="answer"]:not([id^="answertype"]), .stem_answer textarea, .stem_answer2 textarea, iframe[id^="ueditor"], .InpDIV'));
+    const roots = [...new Set(nodes.map(node => node.closest('.Answer, .textDIV, .eidtDiv, .blankItemDiv') || node.closest('.edui-editor') || node.parentElement))];
+    return roots.map((root, index) => this.createEditorTarget(root, index, root.querySelector('textarea')))
+      .filter(target => target && !target.blankItemDiv);
   },
 
   createEditorTarget(root, index, forcedTextarea) {
@@ -416,10 +412,10 @@ const AIAnswerCore = {
   },
 
   extractChoiceTargets(container) {
-    const items = Array.from(container.querySelectorAll('ul.Zy_ulTop li, .stem_answer li, .stem_answer .answerBg, .stem_answer2 .answerBg'));
+    const items = QuestionContainers.optionNodes(container);
     return items.map((item, index) => {
       const fallbackLetter = String.fromCharCode(65 + index);
-      const marker = item.querySelector('.num_option, span[data]');
+      const marker = item.querySelector('.num_option, .num_option_dx, span[data]');
       const markerText = this.normalizeText(marker?.textContent || '');
       // 优先使用 data 属性作为实际值，显示文本作为字母标识
       const dataValue = marker?.getAttribute('data');

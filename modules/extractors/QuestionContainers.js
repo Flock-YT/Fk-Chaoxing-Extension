@@ -22,6 +22,20 @@ const QuestionContainers = {
     return container.getAttribute('typename') || container.querySelector('.read_type, h3 .colorShallow, .newZy_TItle, .newZy_Title')?.textContent || '';
   },
 
+  stemRoot(container) {
+    // Saved and live homework pages place rich question content beside the h3.
+    // Keep the entire question region, excluding child questions and answer UI.
+    const clone = container.cloneNode(true);
+    clone.querySelectorAll('.readComprehensionQues, .reading_answer, .stem_answer, .stem_answer2, .Answer, .Zy_ulTop, .Zy_ulTk, .blankItemDiv, .matching, .selectBox, .edui-editor, .InpDIV, input, textarea, iframe, button, script, style')
+      .forEach(node => node.remove());
+    return clone;
+  },
+
+  optionNodes(container) {
+    return Array.from(container.querySelectorAll('.stem_answer .answerBg, .stem_answer2 .answerBg, .stem_answer .hoverDiv, .stem_answer2 .hoverDiv, ul.Zy_ulTop li, .stem_answer li'))
+      .filter(node => !node.parentElement?.closest('.answerBg, .hoverDiv, ul.Zy_ulTop li, .stem_answer li'));
+  },
+
   imageUrl(image) {
     const source = image.getAttribute('data-original') || image.getAttribute('data-src') || image.getAttribute('src');
     if (!source) return '';
@@ -57,17 +71,17 @@ const QuestionContainers = {
   },
 
   describe(container) {
-    const root = this.titleRoot(container);
+    const root = this.stemRoot(container);
     const parent = container.classList.contains('reading_answer')
       ? container.parentElement?.closest('.singleQuesId, .questionLi, .TiMu') : null;
-    const parentRoot = parent ? this.titleRoot(parent) : null;
-    const optionRoots = Array.from(container.querySelectorAll('.answerBg, ul.Zy_ulTop li, .lineCt, .firstUlList > li:not(.groupTitile), .secondUlList > li:not(.groupTitile), .stem_answer > .clearfix'));
+    const parentRoot = parent ? this.stemRoot(parent) : null;
+    const optionRoots = [...this.optionNodes(container), ...container.querySelectorAll('.lineCt, .firstUlList > li:not(.groupTitile), .secondUlList > li:not(.groupTitile), .stem_answer > .clearfix')];
     return {
       title: this.text(root),
       parentTitle: parentRoot ? this.text(parentRoot) : '',
       parentId: parent?.getAttribute('data') || parent?.id || '',
       subquestionId: container.getAttribute('itemid') || '',
-      subquestionNumber: container.classList.contains('reading_answer') ? root?.textContent?.trim().match(/^[（(](\d+)[）)]/)?.[1] || '' : '',
+      subquestionNumber: container.classList.contains('reading_answer') ? this.titleRoot(container)?.textContent?.trim().match(/^[（(](\d+)[）)]/)?.[1] || '' : '',
       images: [...this.images(root), ...optionRoots.flatMap(node => this.images(node))],
       parentImages: this.images(parentRoot)
     };
@@ -79,10 +93,9 @@ const QuestionContainers = {
   },
 
   options(container) {
-    return Array.from(container.querySelectorAll('.stem_answer .answerBg, .stem_answer2 .answerBg, ul.Zy_ulTop li'))
-      .filter(node => !node.parentElement?.closest('.answerBg, ul.Zy_ulTop li'))
+    return this.optionNodes(container)
       .map((node, index) => {
-        const marker = node.querySelector('.num_option, :scope > span[data]')?.textContent || '';
+        const marker = node.querySelector('.num_option, .num_option_dx, :scope > span[data]')?.textContent || '';
         const letter = marker.match(/[A-Z]/i)?.[0]?.toUpperCase() || String.fromCharCode(65 + index);
         const text = this.text(node.querySelector('.answer_p') || node).replace(/^[A-Z][.、．]\s*/i, '');
         return text ? `${letter}. ${text}` : '';

@@ -101,10 +101,11 @@ const QuestionCollector = {
         if (header) { lines.push(`# ${header}`); lines.push(''); }
         let previousParent = null;
         questions.forEach((q, idx) => {
-          if (q.parentTitle && (!q.parentId || previousParent !== q.parentId)) {
+          const parentKey = q.parentId ? `${q.parentId}\n${q.parentTitle}` : null;
+          if (q.parentTitle && (!parentKey || previousParent !== parentKey)) {
             lines.push(`## 大题：${q.parentTitle}`, '');
           }
-          previousParent = q.parentId || null;
+          previousParent = parentKey;
           lines.push(`${idx + 1}. ${q.subquestionNumber ? `（子题 ${q.subquestionNumber}）` : ''}${q.title}`);
           if (Array.isArray(q.options) && q.options.length) {
             q.options.forEach(opt => lines.push(opt));
