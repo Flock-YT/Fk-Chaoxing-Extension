@@ -28,10 +28,20 @@ const QuestionContainers = {
     const clone = container.cloneNode(true);
     clone.querySelectorAll('.readComprehensionQues, .reading_answer, .stem_answer, .stem_answer2, .Answer, .Zy_ulTop, .Zy_ulTk, .blankItemDiv, .matching, .selectBox, .edui-editor, .InpDIV, input, textarea, iframe, button, script, style')
       .forEach(node => node.remove());
+    this.optionNodes(clone).forEach(node => node.remove());
     return clone;
   },
 
   optionNodes(container) {
+    // Single-choice rows can omit answerBg/hoverDiv or sit outside stem_answer.
+    // Use the actual choice marker to find its row before falling back to layout.
+    const markers = Array.from(container.querySelectorAll('.num_option, .num_option_dx'));
+    const rows = markers.map(marker => {
+      const row = marker.closest('.answerBg, .hoverDiv, [qid], li, .clearfix') || marker.parentElement;
+      return row !== container && container.contains(row) &&
+        row.closest('.reading_answer, .singleQuesId, .questionLi, .TiMu') === container ? row : null;
+    }).filter(Boolean);
+    if (rows.length) return [...new Set(rows)];
     return Array.from(container.querySelectorAll('.stem_answer .answerBg, .stem_answer2 .answerBg, .stem_answer .hoverDiv, .stem_answer2 .hoverDiv, ul.Zy_ulTop li, .stem_answer li'))
       .filter(node => !node.parentElement?.closest('.answerBg, .hoverDiv, ul.Zy_ulTop li, .stem_answer li'));
   },
