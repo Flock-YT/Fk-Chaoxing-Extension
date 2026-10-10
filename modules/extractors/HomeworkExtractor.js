@@ -91,6 +91,8 @@ const HomeworkExtractor = {
       } else {
         const title = getTitleFrom(box);
         if (!title) return;
+        const dropdown = DropdownQuestions.extract(box);
+        if (dropdown) { questions.push({ title, ...dropdown }); return; }
         
         const ul = box.querySelector('ul.Zy_ulTop.w-top.fl');
         const lis = ul ? Array.from(ul.querySelectorAll(':scope > li')) : [];

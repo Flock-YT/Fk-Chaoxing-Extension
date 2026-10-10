@@ -423,6 +423,10 @@ const AIAnswerCore = {
       throw new Error('连线题显示编号与答题控件无法对应');
     }
 
+    if (!sorting && targets.every(target => target.select)) {
+      return this.applyNativeMatchingAnswer(question, answer, targets, hidden, qid);
+    }
+
     // Resolve every choice before clicking anything, including shuffled internal IDs.
     const choices = targets.map((target, index) => {
       const label = sorting ? answer.answers[index] : answer.pairs.find(pair => pair.left === target.left)?.right;
@@ -466,6 +470,44 @@ const AIAnswerCore = {
         throw new Error('连线配对与答案字段不一致，请检查页面');
       }
     }
+    return true;
+  },
+
+  applyNativeMatchingAnswer(question, answer, targets, hidden, qid) {
+    // Legacy chapter homework uses native selects decorated with Chosen.
+    // Its submit serializer reads select's value attribute and lineOption's index.
+    const choices = targets.map(target => {
+      const label = answer.pairs.find(pair => pair.left === target.left)?.right;
+      const matches = Array.from(target.select.options).filter(option => DropdownQuestions.text(option.textContent) === label);
+      if (matches.length !== 1 || !/^\d+$/.test(target.name || '')) throw new Error('连线下拉选项或内部编号无效');
+      const option = matches[0];
+      const chosen = target.box.querySelector('.chosen-container');
+      if (chosen && !chosen.querySelector('.chosen-single')) throw new Error('连线下拉控件未准备好，请刷新题目');
+      if (target.select.disabled || option.disabled) throw new Error('连线选项不可写入');
+      return { ...target, option, chosen, label };
+    });
+    if (new Set(choices.map(choice => choice.name)).size !== choices.length) throw new Error('连线控件内部编号重复');
+    for (const choice of choices) {
+      if (choice.chosen) {
+        // Use Chosen's original handler to keep the native select and visible UI in sync.
+        choice.box.querySelector('.chosen-single')?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        // Chosen builds its results lazily on opening and selects the highlighted row.
+        const item = choice.chosen.querySelector(`.chosen-results li[data-option-array-index="${choice.option.index}"]`);
+        if (!item) throw new Error('连线下拉选项未加载，请刷新题目');
+        item.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        item.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+      } else {
+        choice.select.value = choice.option.value;
+      }
+      if (choice.select.value !== choice.option.value) throw new Error('连线下拉框未更新，请重新尝试');
+      choice.select.setAttribute('value', choice.option.value);
+      this.dispatchChoiceEvents(choice.select);
+    }
+    hidden.value = JSON.stringify(choices.map(choice => ({ name: choice.name, content: choice.option.value }))
+      .sort((a, b) => Number(a.name) - Number(b.name)));
+    const typeInput = question.container.querySelector(`#answertype${qid}`);
+    if (typeInput) typeInput.value = '11';
+    this.dispatchChoiceEvents(hidden);
     return true;
   },
 
