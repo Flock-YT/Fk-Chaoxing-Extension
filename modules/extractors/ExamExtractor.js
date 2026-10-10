@@ -36,38 +36,18 @@ const ExamExtractor = {
     const questions = [];
     
     // Find all question containers
-    const containers = QuestionContainers.find(doc).filter(container => container.classList.contains('singleQuesId'));
-    
+    const containers = QuestionContainers.find(doc);
     containers.forEach(container => {
       const question = this.parseExamQuestion(container);
       if (question) questions.push(question);
     });
-    
     return questions;
   },
-  
-  // Parse a single exam question
-  parseExamQuestion(container) {
-    // Extract title
-    const titleEl = container.querySelector('h3.mark_name.colorDeep, h3.mark_name');
-    const stem = this.extractTitle(titleEl);
-    if (!stem) return null;
-    const typeLabel = this.getTypeLabel(container);
-    const title = this.normalizeText(`${typeLabel} ${stem}`);
-    
-    const dropdown = DropdownQuestions.extract(container);
-    if (dropdown) return { title, ...dropdown };
 
-    // Extract options
-    const options = this.extractOptions(container);
-    
-    // Determine question type based on number of options
-    const type = options.length === 0 ? 'other' : 
-                 options.length <= 4 ? 'single' : 'multi';
-    
-    return { title, options, type };
+  parseExamQuestion(container) {
+    return HomeworkExtractor.parseModernQuestion(container);
   },
-  
+
   // Extract exam question title
   extractTitle(titleEl) {
     // Extract content from div with overflow style

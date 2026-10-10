@@ -99,8 +99,13 @@ const QuestionCollector = {
     sections.forEach(({ header, questions }) => {
       if (questions?.length) {
         if (header) { lines.push(`# ${header}`); lines.push(''); }
+        let previousParent = null;
         questions.forEach((q, idx) => {
-          lines.push(`${idx + 1}. ${q.title}`);
+          if (q.parentTitle && (!q.parentId || previousParent !== q.parentId)) {
+            lines.push(`## 大题：${q.parentTitle}`, '');
+          }
+          previousParent = q.parentId || null;
+          lines.push(`${idx + 1}. ${q.subquestionNumber ? `（子题 ${q.subquestionNumber}）` : ''}${q.title}`);
           if (Array.isArray(q.options) && q.options.length) {
             q.options.forEach(opt => lines.push(opt));
           }

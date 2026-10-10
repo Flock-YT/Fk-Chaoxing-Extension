@@ -15,6 +15,10 @@ const AIApi = {
         questionIndex: index + 1,
         type: question.type,
         title: question.title,
+        parentTitle: question.parentTitle || '',
+        subquestionId: question.subquestionId || '',
+        subquestionNumber: question.subquestionNumber || '',
+        images: [...(question.parentImages || []), ...(question.images || [])],
         blankCount: question.blankCount || 0,
         options: Array.isArray(question.options) ? question.options : [],
         existingAnswer: question.existingAnswer ?? null,
@@ -60,6 +64,21 @@ const AIApi = {
     ].join('\n');
   },
 
+  withImages(text, questions = []) {
+    const content = [{ type: 'text', text }];
+    const seen = new Set();
+    questions.forEach((question, index) => {
+      [...(question.parentImages || []), ...(question.images || [])].forEach(image => {
+        if (!image?.url || seen.has(image.url)) return;
+        if (!/^https?:\/\//i.test(image.url) && !/^data:image\/(png|jpe?g|gif|webp);base64,/i.test(image.url)) return;
+        seen.add(image.url);
+        content.push({ type: 'text', text: `第 ${question.index || index + 1} 题引用图片：${image.alt || '题目图片'}（相同 URL 的图片可供其他子题共同引用）` });
+        content.push({ type: 'image_url', image_url: { url: image.url } });
+      });
+    });
+    return content.length > 1 ? content : text;
+  },
+
   normalizeConfig(config = {}) {
     return AIConfig.normalize({ ...this.DEFAULT_CONFIG, ...config, path: config.path || AIConfig.defaultPath(config.apiType) });
   },
@@ -100,7 +119,7 @@ const AIApi = {
             },
             {
               role: 'user',
-              content: prompt
+              content: this.withImages(prompt, questions)
             }
           ]
         }

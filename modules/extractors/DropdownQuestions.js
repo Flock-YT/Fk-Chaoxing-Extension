@@ -5,7 +5,7 @@ const DropdownQuestions = {
   },
 
   detectType(container) {
-    const label = container.getAttribute('typename') || container.querySelector('h3 .colorShallow, .newZy_TItle, .newZy_Title')?.textContent || '';
+    const label = QuestionContainers.typeLabel(container);
     if (label.includes('排序') || container.querySelector('.selectBox li[qtype="13"]')) return 'sorting';
     if (label.includes('连线') || container.querySelector('.selectBox li[qtype="11"], .matching .firstUlList, [id^="connLine_"]')) return 'matching';
     return null;
@@ -17,7 +17,7 @@ const DropdownQuestions = {
       const id = this.text(label?.textContent).replace(/[.、．。]$/, '').trim();
       const clone = node.cloneNode(true);
       clone.querySelector(':scope > span, :scope > i')?.remove();
-      return { id, text: this.text(clone.textContent) };
+      return { id, text: QuestionContainers.text(clone) };
     }).filter(item => item.id && item.text);
   },
 

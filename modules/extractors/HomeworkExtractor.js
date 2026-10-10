@@ -14,9 +14,7 @@ const HomeworkExtractor = {
 
   getTypeLabel(container) {
     const rawType = this.normalizeText(
-      container.getAttribute('typename') ||
-      container.querySelector('h3 .colorShallow')?.textContent ||
-      ''
+      QuestionContainers.typeLabel(container)
     ).replace(/[()（）]/g, '');
 
     return rawType ? `(${rawType})` : '';
@@ -49,69 +47,18 @@ const HomeworkExtractor = {
   },
 
   parseModernQuestion(container) {
-    const titleEl = container.querySelector('h3.mark_name, h3');
-    const typeLabel = this.getTypeLabel(container);
-    const stem = this.normalizeText(titleEl?.textContent || '')
-      .replace(/^\d+\.\s*/, '')
-      .replace(/^\((?:单选题|多选题|判断题|填空题|简答题|排序题|连线题)\)\s*/, '');
-    const title = this.normalizeText(`${typeLabel} ${stem}`);
-
-    if (!title) return null;
+    const details = QuestionContainers.describe(container);
+    if (!details.title) return null;
     const dropdown = DropdownQuestions.extract(container);
-    if (dropdown) return { title, ...dropdown };
-
-    const options = this.sortOptions(Array.from(container.querySelectorAll('.stem_answer .answerBg')).map((el, idx) => {
-      const letter = this.getOptionLetter(idx);
-      const content = this.normalizeText(el.querySelector('.answer_p')?.textContent || el.textContent || '');
-      return letter && content ? `${letter}. ${content}` : '';
-    }).filter(Boolean));
-
-    return {
-      title,
-      options,
-      type: this.detectType(container, options)
-    };
+    const options = dropdown?.options || QuestionContainers.options(container);
+    return { ...details, options, type: this.detectType(container, options), ...(dropdown || {}) };
   },
 
-  // Main extraction method
   extract(doc = document) {
-    const questions = [];
-    
-    // Helper to find title
-    const getTitleFrom = (root) => {
-      const node = root.querySelector('.Zy_TItle .fontLabel, .Zy_Title .fontLabel, .newZy_TItle .fontLabel, .newZy_Title .fontLabel')
-        || root.querySelector('.Zy_TItle, .Zy_Title, .newZy_TItle, .newZy_Title');
-      return this.normalizeText(node?.textContent || '');
-    };
-    
-    QuestionContainers.find(doc).forEach(box => {
-      if (box.classList.contains('singleQuesId')) {
-        const question = this.parseModernQuestion(box);
-        if (question) questions.push(question);
-      } else {
-        const title = getTitleFrom(box);
-        if (!title) return;
-        const dropdown = DropdownQuestions.extract(box);
-        if (dropdown) { questions.push({ title, ...dropdown }); return; }
-        
-        const ul = box.querySelector('ul.Zy_ulTop.w-top.fl');
-        const lis = ul ? Array.from(ul.querySelectorAll(':scope > li')) : [];
-        
-        const options = lis.map((li, idx) => {
-          const p = li.querySelector('p') || li.querySelector('a') || li;
-          const text = this.normalizeText(p?.textContent || '');
-          return `${String.fromCharCode(65 + idx)}. ${text}`;
-        }).filter(Boolean);
-        
-        questions.push({ title, options: this.sortOptions(options), type: this.detectType(box, options) });
-      }
-    });
-    
-    // Fallback if no containers found
-    if (questions.length === 0) {
-      this.extractTitlesFallback(doc).forEach(t => questions.push({ title: t, options: [], type: 'other' }));
+    const questions = QuestionContainers.find(doc).map(box => this.parseModernQuestion(box)).filter(Boolean);
+    if (!questions.length) {
+      this.extractTitlesFallback(doc).forEach(title => questions.push({ title, options: [], type: 'other' }));
     }
-    
     return questions;
   },
 

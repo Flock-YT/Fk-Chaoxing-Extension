@@ -255,6 +255,8 @@ const AIChat = {
   },
   snapshot(q) {
     return { id: q.id, index: q.index, type: q.type, title: q.title, options: q.options, blankCount: q.blankCount,
+      parentTitle: q.parentTitle, parentId: q.parentId, subquestionId: q.subquestionId, images: q.images, parentImages: q.parentImages,
+      subquestionNumber: q.subquestionNumber,
       existingAnswer: q.existingAnswer,
       answerDraft: q.type === 'programming' ? q.answerDraft : undefined,
       codeStatus: q.type === 'programming' ? q.codeStatus : undefined, matchingGroups: q.matchingGroups, sortingLabels: q.sortingLabels };
@@ -385,8 +387,8 @@ const AIChat = {
     const system = AIConfig.buildSystemPrompt(config.systemPrompt);
     const current = this.requestText(request, config.userPrompt);
     const lastUser = request.preview ? this.history.length : this.history.findLastIndex(item => item.role === 'user' && item.request);
-    const recent = this.history.slice(Math.max(0, lastUser - 12), lastUser).map(item => ({ role: item.role, content: item.role === 'user' && item.request ? this.requestText(item.request) : item.text }));
-    return [{ role: 'system', content: system }, ...recent, { role: 'user', content: current }];
+    const recent = this.history.slice(Math.max(0, lastUser - 12), lastUser).map(item => ({ role: item.role, content: item.role === 'user' && item.request ? AIApi.withImages(this.requestText(item.request), item.request.context) : item.text }));
+    return [{ role: 'system', content: system }, ...recent, { role: 'user', content: AIApi.withImages(current, request.context) }];
   },
   requestText(request, userPrompt = '') {
     const scope = request.contextScope === 'all' ? '全部题目' : request.context.length === 1 ? '单题' : '勾选多题';
@@ -430,7 +432,7 @@ const AIChat = {
       for (const { index, answer } of entries) {
         const q = targets[index], snap = request.target[index];
         const current = q.remote ? q : AIAnswerCore.parseQuestionContainer(q.container, q.docRef, q.sectionHeader);
-        if (!current || current.id !== snap.id || current.title !== snap.title || current.type !== snap.type ||
+        if (!current || current.id !== snap.id || current.title !== snap.title || current.type !== snap.type || !QuestionContainers.sameContext(current, snap) ||
             JSON.stringify(current.options) !== JSON.stringify(snap.options) ||
             JSON.stringify(current.existingAnswer) !== JSON.stringify(snap.existingAnswer) ||
             (snap.type === 'programming' && current.answerDraft !== snap.answerDraft) ||
@@ -524,7 +526,7 @@ const AIChat = {
       const q = this.frameQuestions.get(msg.questionId);
       const current = q && AIAnswerCore.parseQuestionContainer(q.container, q.docRef, q.sectionHeader);
       const s = msg.snap;
-      const same = current && current.id === s.id && current.title === s.title && current.type === s.type &&
+      const same = current && current.id === s.id && current.title === s.title && current.type === s.type && QuestionContainers.sameContext(current, s) &&
         JSON.stringify(current.options) === JSON.stringify(s.options) &&
         (s.type !== 'programming' || current.answerDraft === s.answerDraft) &&
         JSON.stringify(current.matchingGroups) === JSON.stringify(s.matchingGroups) &&

@@ -89,7 +89,7 @@ chrome.runtime.onConnect.addListener(port => {
 
 async function streamDialogueReply(messages, reasoningEffort, controller, onDelta, onThought, profileId) {
   if (!Array.isArray(messages) || !messages.length ||
-      messages.some(item => !['system', 'user', 'assistant'].includes(item?.role) || typeof item.content !== 'string')) {
+      messages.some(item => !['system', 'user', 'assistant'].includes(item?.role) || !validMessageContent(item))) {
     throw new Error('对话内容无效');
   }
   if (!AIConfig.efforts.includes(reasoningEffort)) throw new Error('不支持的思考等级');
@@ -209,10 +209,21 @@ function retryableError(message) {
   return error;
 }
 
+function validMessageContent(message) {
+  if (typeof message.content === 'string') return true;
+  return message.role === 'user' && Array.isArray(message.content) && message.content.length > 0 && message.content.every(part =>
+    (part?.type === 'text' && typeof part.text === 'string') ||
+    (part?.type === 'image_url' && typeof part.image_url?.url === 'string' &&
+      (/^https?:\/\//i.test(part.image_url.url) || /^data:image\/(png|jpe?g|gif|webp);base64,/i.test(part.image_url.url))));
+}
+
 function buildRequestBody(config, messages, stream = false) {
   const body = { model: config.model, stream };
   if (config.apiType === 'responses') {
-    body.input = messages;
+    body.input = messages.map(message => ({ ...message, content: Array.isArray(message.content)
+      ? message.content.map(part => part.type === 'image_url'
+        ? { type: 'input_image', image_url: part.image_url.url }
+        : { type: 'input_text', text: part.text }) : message.content }));
     body.store = false;
     if (config.reasoningEffort) body.reasoning = { effort: config.reasoningEffort };
   } else {

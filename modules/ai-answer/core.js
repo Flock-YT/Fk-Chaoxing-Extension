@@ -191,6 +191,7 @@ const AIAnswerCore = {
       id: this.questionIds.get(container),
       title,
       sectionHeader,
+      ...QuestionContainers.describe(container),
       type,
       blankCount: fillTargets.length,
       options,
@@ -211,9 +212,7 @@ const AIAnswerCore = {
     const dropdownType = DropdownQuestions.detectType(container);
     if (dropdownType) return dropdownType;
     const typeText = this.normalizeText(
-      container.getAttribute('typename') ||
-      container.querySelector('.newZy_TItle, .newZy_Title, .colorShallow')?.textContent ||
-      ''
+      QuestionContainers.typeLabel(container)
     );
 
     const answerCode = container.querySelector('.stem_answer pre, .Answer pre, .stem_answer code, .Answer code, .stem_answer textarea, .Answer textarea');
@@ -255,17 +254,7 @@ const AIAnswerCore = {
   },
 
   extractQuestionTitle(container) {
-    const titleRoot = container.querySelector('.Zy_TItle .fontLabel, .Zy_Title .fontLabel, .newZy_TItle .fontLabel, .newZy_Title .fontLabel')
-      || container.querySelector('.Zy_TItle, .Zy_Title, .newZy_TItle, .newZy_Title, h3.mark_name, h3, .fontLabel');
-
-    const clone = titleRoot ? titleRoot.cloneNode(true) : null;
-    if (!clone) {
-      return '';
-    }
-
-    clone.querySelectorAll('script, style').forEach(node => node.remove());
-    const text = this.normalizeText(clone.textContent || '');
-    return text.replace(/^\d+\s*/, '').trim();
+    return QuestionContainers.describe(container).title;
   },
 
   findProgramTarget(container, shortAnswerTargets = []) {
@@ -351,21 +340,11 @@ const AIAnswerCore = {
   },
 
   extractOptions(container) {
-    const optionNodes = Array.from(container.querySelectorAll('.stem_answer .answerBg, ul.Zy_ulTop li, .Zy_ulTop li'));
-    const options = [];
-
-    optionNodes.forEach((node, index) => {
-      const letter = String.fromCharCode(65 + index);
-      const text = this.normalizeText(node.textContent || '');
-      if (text) {
-        options.push(`${letter}. ${text.replace(/^[A-Z][.、]\s*/, '')}`);
-      }
-    });
-
-    return options;
+    return QuestionContainers.options(container);
   },
 
   extractFillTargets(container) {
+    if (/简答|程序|编程|代码/.test(QuestionContainers.typeLabel(container))) return [];
     // 传统填空题结构
     const traditionalTargets = Array.from(container.querySelectorAll('.clearfix .Zy_ulTk .blankItemDiv, .blankItemDiv'))
       .map((blankItem, blankIndex) => this.createEditorTarget(blankItem, blankIndex))
@@ -382,7 +361,7 @@ const AIAnswerCore = {
         // 查找UEditor编辑器
         const textarea = answerDiv.querySelector('textarea[id^="answerEditor"]');
         const editorRoot = answerDiv.querySelector('.edui-editor') || answerDiv;
-        const iframe = answerDiv.querySelector('iframe[id^="ueditor_"]');
+        const iframe = answerDiv.querySelector('iframe[id^="ueditor"]');
         
         if (!textarea && !iframe) {
           return null;
@@ -419,7 +398,7 @@ const AIAnswerCore = {
     }
 
     const textarea = forcedTextarea || root.querySelector('textarea[id^="answerEditor"], textarea[id^="answer"]:not([id^="answertype"])');
-    const iframe = root.querySelector('[id$="_iframeholder"] iframe, iframe[id^="ueditor_"]');
+    const iframe = root.querySelector('[id$="_iframeholder"] iframe, iframe[id^="ueditor"]');
     const inputDiv = root.querySelector('.InpDIV');
 
     if (!textarea && !iframe && !inputDiv) {
@@ -437,7 +416,7 @@ const AIAnswerCore = {
   },
 
   extractChoiceTargets(container) {
-    const items = Array.from(container.querySelectorAll('ul.Zy_ulTop li, .stem_answer li, .stem_answer .answerBg'));
+    const items = Array.from(container.querySelectorAll('ul.Zy_ulTop li, .stem_answer li, .stem_answer .answerBg, .stem_answer2 .answerBg'));
     return items.map((item, index) => {
       const fallbackLetter = String.fromCharCode(65 + index);
       const marker = item.querySelector('.num_option, span[data]');
@@ -502,7 +481,7 @@ const AIAnswerCore = {
     if (!question.container?.isConnected) throw new Error('题目已变化，请刷新题目列表');
     if (question.docRef) {
       const current = this.parseQuestionContainer(question.container, question.docRef, question.sectionHeader);
-      if (!current || current.id !== question.id || current.title !== question.title ||
+      if (!current || current.id !== question.id || current.title !== question.title || !QuestionContainers.sameContext(current, question) ||
           current.type !== question.type || JSON.stringify(current.options) !== JSON.stringify(question.options) ||
           JSON.stringify(current.existingAnswer) !== JSON.stringify(question.existingAnswer)) {
         throw new Error('题目内容已变化，请刷新题目列表');

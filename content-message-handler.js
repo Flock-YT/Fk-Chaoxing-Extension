@@ -73,7 +73,11 @@ const ContentMessageHandler = {
       }
 
       // 收集题目
-      const content = await QuestionCollector.collectAll();
+      if (totalQuestions === 0) {
+        sendResponse({ success: false, message: '未找到题目，请确认已打开作业或考试题目页面并等待加载完成' });
+        return;
+      }
+      const content = QuestionCollector.formatSections(sectionsTest);
       
       if (totalQuestions > 0 && window.self === window.top) {
         GlobalLogger.success(`共获取 ${totalQuestions} 道题目`);
