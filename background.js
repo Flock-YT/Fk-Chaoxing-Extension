@@ -49,7 +49,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 chrome.runtime.onConnect.addListener(port => {
-  if (port.name !== 'AI_DIALOGUE_STREAM') return;
+  if (!['AI_DIALOGUE_STREAM', 'AI_CHAT_STREAM'].includes(port.name)) return;
   let started = false;
   let finished = false;
   let controller;
@@ -72,7 +72,10 @@ chrome.runtime.onConnect.addListener(port => {
     controller = new AbortController();
     streamDialogueReply(message.messages, message.reasoningEffort, controller, delta => {
       if (!finished) port.postMessage({ type: 'delta', delta });
-    }).then(() => complete({ type: 'done' }))
+    }, port.name === 'AI_CHAT_STREAM' ? delta => {
+      if (!finished) port.postMessage({ type: 'thought', delta });
+    } : undefined, port.name === 'AI_CHAT_STREAM' ? message.profileId : undefined)
+      .then(() => complete({ type: 'done' }))
       .catch(error => {
         if (!finished) complete({ type: 'error', message: error.message });
       });
@@ -84,7 +87,7 @@ chrome.runtime.onConnect.addListener(port => {
   });
 });
 
-async function streamDialogueReply(messages, reasoningEffort, controller, onDelta) {
+async function streamDialogueReply(messages, reasoningEffort, controller, onDelta, onThought, profileId) {
   if (!Array.isArray(messages) || !messages.length ||
       messages.some(item => !['system', 'user', 'assistant'].includes(item?.role) || typeof item.content !== 'string')) {
     throw new Error('对话内容无效');
@@ -93,7 +96,10 @@ async function streamDialogueReply(messages, reasoningEffort, controller, onDelt
 
   const data = await chrome.storage.local.get(['aiProfiles', 'activeAiProfileId', 'aiConfig']);
   const profiles = Array.isArray(data.aiProfiles) ? data.aiProfiles : [];
-  const active = profiles.find(item => item.id === data.activeAiProfileId) || profiles[0] || data.aiConfig;
+  const active = profileId
+    ? profiles.find(item => item.id === profileId)
+    : profiles.find(item => item.id === data.activeAiProfileId) || profiles[0] || data.aiConfig;
+  if (profileId && !active) throw new Error('所选模型配置已删除，请重新选择');
   if (!active) throw new Error('请先在插件弹窗配置 AI 模型');
   const config = normalizeApiConfig({ ...active, reasoningEffort });
   if (!config.baseUrl || !config.apiKey || !config.model) throw new Error('当前 AI 模型配置不完整');
@@ -119,7 +125,7 @@ async function streamDialogueReply(messages, reasoningEffort, controller, onDelt
       signal: controller.signal
     });
     if (!response.ok) throw new Error(`AI API 请求失败（${response.status}）：${(await response.text()).slice(0, 500)}`);
-    await AIStream.consume(response.body, config.apiType, onDelta);
+    await AIStream.consume(response.body, config.apiType, onDelta, onThought);
   } catch (err) {
     if (timedOut) throw new Error('AI API 请求超时（180 秒）');
     throw err;

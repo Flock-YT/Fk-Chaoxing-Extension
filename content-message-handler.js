@@ -27,6 +27,13 @@ const ContentMessageHandler = {
           await this.handleAIAnswer(sendResponse, request.config);
           break;
 
+        case 'openAiChat':
+          if (window.self !== window.top) return;
+          AIChat.quickEffort = request.reasoningEffort ?? null;
+          await AIChat.open();
+          sendResponse({ success: true });
+          break;
+
         case 'insertTestAnswer':
           await this.handleInsertTestAnswer(sendResponse);
           break;

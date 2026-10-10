@@ -1,6 +1,6 @@
 // SSE parser shared by the dialogue streaming request and its local tests.
 const AIStream = {
-  createParser(apiType, onDelta) {
+  createParser(apiType, onDelta, onThought) {
     let buffer = '';
     let text = '';
     let terminal = false;
@@ -30,12 +30,14 @@ const AIStream = {
         const index = contentBuffer.indexOf(marker);
         if (index >= 0) {
           if (!inThink) append(contentBuffer.slice(0, index));
+          else onThought?.(contentBuffer.slice(0, index));
           contentBuffer = contentBuffer.slice(index + marker.length);
           inThink = !inThink;
           continue;
         }
         const keep = suffixLength(contentBuffer, marker);
         if (!inThink) append(contentBuffer.slice(0, contentBuffer.length - keep));
+        else onThought?.(contentBuffer.slice(0, contentBuffer.length - keep));
         contentBuffer = contentBuffer.slice(contentBuffer.length - keep);
         break;
       }
@@ -62,6 +64,7 @@ const AIStream = {
 
       if (apiType === 'responses') {
         if (event.type === 'response.output_text.delta') append(event.delta);
+        if (event.type === 'response.reasoning_summary_text.delta') onThought?.(event.delta);
         if (event.type === 'response.output_text.done' && !text) append(event.text);
         if (event.type === 'response.refusal.delta' || event.type === 'response.refusal.done') {
           throw new Error('AI 拒绝回答');
@@ -73,7 +76,8 @@ const AIStream = {
       } else {
         const choice = event.choices?.[0];
         if (choice?.delta?.refusal) throw new Error(`AI 拒绝回答：${choice.delta.refusal}`);
-        if (!choice?.delta?.reasoning_content) appendVisibleContent(choice?.delta?.content);
+        if (choice?.delta?.reasoning_content) onThought?.(choice.delta.reasoning_content);
+        if (choice?.delta?.content) appendVisibleContent(choice.delta.content);
         if (choice?.finish_reason) finishReason = choice.finish_reason;
       }
     };
@@ -100,11 +104,11 @@ const AIStream = {
     };
   },
 
-  async consume(body, apiType, onDelta) {
+  async consume(body, apiType, onDelta, onThought) {
     if (!body?.getReader) throw new Error('AI API 未返回可读取的数据流');
     const reader = body.getReader();
     const decoder = new TextDecoder();
-    const parser = this.createParser(apiType, onDelta);
+    const parser = this.createParser(apiType, onDelta, onThought);
     try {
       while (true) {
         const { value, done } = await reader.read();

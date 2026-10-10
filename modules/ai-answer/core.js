@@ -16,7 +16,8 @@ const AIAnswerCore = {
       AINotify.info('开始扫描题目与可写入编辑器...');
       GlobalLogger.info('AI 开始分析题目...');
 
-      const questions = await this.collectQuestions();
+      const questions = typeof AIChat !== 'undefined' && AIChat.root && AIChat.questions.length
+        ? AIChat.questions : await this.collectQuestions();
       if (questions.length === 0) {
         throw new Error('未找到任何题目');
       }
@@ -475,7 +476,9 @@ const AIAnswerCore = {
       const answer = answers[index];
       try {
         if (answer?.error) throw new Error(answer.error);
-        const applied = await this.applyAnswerToQuestion(question, answer);
+        const applied = question.remote
+          ? await AIChat.applyRemote(question, AIChat.snapshot(question), answer).then(() => true)
+          : await this.applyAnswerToQuestion(question, answer);
         if (applied) {
           appliedCount += 1;
         } else {
