@@ -1,6 +1,8 @@
 // AI 答题助手核心逻辑
 const AIAnswerCore = {
   isProcessing: false,
+  questionIds: new WeakMap(),
+  nextQuestionId: 1,
 
   async processAllQuestions(requestConfig) {
     if (this.isProcessing) {
@@ -161,6 +163,7 @@ const AIAnswerCore = {
   },
 
   parseQuestionContainer(container, docRef, sectionHeader) {
+    if (!this.questionIds.has(container)) this.questionIds.set(container, `q${this.nextQuestionId++}`);
     const fillTargets = this.extractFillTargets(container);
     const shortAnswerTargets = fillTargets.length === 0 ? this.extractShortAnswerTargets(container) : [];
     const dropdown = DropdownQuestions.extract(container);
@@ -172,7 +175,19 @@ const AIAnswerCore = {
       return null;
     }
 
+    const programTarget = type === 'programming' ? this.findProgramTarget(container, [...shortAnswerTargets, ...fillTargets]) : null;
+    const readContent = programTarget ? this.readProgramContent(programTarget) : null;
+    const answerDraft = readContent ?? '';
+    const choiceTargets = this.extractChoiceTargets(container);
+    const existingAnswer = type === 'programming' ? answerDraft :
+      type === 'fill_blank' ? fillTargets.map(target => this.readExistingEditor(target)) :
+      type === 'short_answer' ? shortAnswerTargets.map(target => this.readExistingEditor(target)) :
+      type === 'sorting' || type === 'matching' ? DropdownQuestions.getTargets(container, type)
+        .map(target => target.select?.value ?? this.normalizeText(target.span?.textContent || '')) :
+      choiceTargets.filter(target => target.input?.checked || target.marker?.classList.contains(target.selectedClass))
+        .map(target => target.letter);
     return {
+      id: this.questionIds.get(container),
       title,
       sectionHeader,
       type,
@@ -180,7 +195,11 @@ const AIAnswerCore = {
       options,
       fillTargets,
       shortAnswerTargets,
-      choiceTargets: this.extractChoiceTargets(container),
+      programTarget,
+      answerDraft,
+      existingAnswer,
+      codeStatus: type === 'programming' ? (readContent !== null ? 'read' : 'unavailable') : undefined,
+      choiceTargets,
       ...(dropdown || {}),
       container,
       docRef
@@ -195,6 +214,13 @@ const AIAnswerCore = {
       container.querySelector('.newZy_TItle, .newZy_Title, .colorShallow')?.textContent ||
       ''
     );
+
+    const answerCode = container.querySelector('.stem_answer pre, .Answer pre, .stem_answer code, .Answer code, .stem_answer textarea, .Answer textarea');
+    const source = answerCode?.value || answerCode?.textContent || '';
+    if (/程序|编程|代码/.test(typeText) || container.querySelector('.CodeMirror, .cm-editor, .monaco-editor') ||
+        /#\s*include\s*<|\bint\s+main\s*\(|\bpublic\s+static\s+void\s+main\s*\(|\bdef\s+\w+\s*\(/.test(source)) {
+      return 'programming';
+    }
 
     if (fillTargets.length > 0 || typeText.includes('填空')) {
       return 'fill_blank';
@@ -239,6 +265,88 @@ const AIAnswerCore = {
     clone.querySelectorAll('script, style').forEach(node => node.remove());
     const text = this.normalizeText(clone.textContent || '');
     return text.replace(/^\d+\s*/, '').trim();
+  },
+
+  findProgramTarget(container, shortAnswerTargets = []) {
+    const editor = container.querySelector('.CodeMirror, .cm-editor, .monaco-editor');
+    if (editor) return { kind: 'code', element: editor, container };
+    const target = shortAnswerTargets[0];
+    if (target) return { kind: 'rich', ...target, container };
+    const textarea = container.querySelector('.stem_answer textarea, .Answer textarea');
+    if (textarea) return { kind: 'text', textarea, container };
+    const pre = container.querySelector('.stem_answer pre, .Answer pre, .stem_answer code, .Answer code');
+    if (pre) return { kind: 'pre', element: pre, container };
+    return null;
+  },
+
+  readProgramContent(target) {
+    if (!target) return null;
+    if (target.kind === 'code') {
+      const element = target.element;
+      delete element.dataset.cxCodeValue;
+      element.dispatchEvent(new Event('CX_CODE_EDITOR_READ', { bubbles: true }));
+      const value = element.dataset.cxCodeValue;
+      delete element.dataset.cxCodeValue;
+      return value ?? null;
+    }
+    if (target.kind === 'pre') return target.element.textContent || '';
+    if (target.kind === 'text') return target.textarea.value || '';
+    let body;
+    try { body = target.iframe?.contentDocument?.body; } catch (_) { body = null; }
+    if (body) return this.readCodeText(body);
+    const value = target.textarea?.value || '';
+    if (/<(?:p|div|br|pre)\b/i.test(value)) {
+      const parsed = new DOMParser().parseFromString(value, 'text/html');
+      return this.readCodeText(parsed.body);
+    }
+    return value;
+  },
+
+  readCodeText(root) {
+    if (root.children.length === 1 && root.firstElementChild.tagName === 'PRE') {
+      return root.firstElementChild.textContent || '';
+    }
+    const clone = root.cloneNode(true);
+    clone.querySelectorAll('br').forEach(node => node.replaceWith('\n'));
+    clone.querySelectorAll('p, div').forEach(node => node.append('\n'));
+    return clone.textContent.replace(/\n$/, '');
+  },
+
+  readExistingEditor(target) {
+    let body;
+    try { body = target.iframe?.contentDocument?.body; } catch (_) { body = null; }
+    if (body) return this.readCodeText(body);
+    return target.textarea?.value || target.inputDiv?.textContent || '';
+  },
+
+  writeProgramContent(target, value) {
+    if (typeof value !== 'string' || !value.trim()) return false;
+    if (target.kind === 'code') {
+      const element = target.element;
+      element.dataset.cxCodeWrite = value;
+      delete element.dataset.cxCodeWritten;
+      element.dispatchEvent(new Event('CX_CODE_EDITOR_WRITE', { bubbles: true }));
+      const written = element.dataset.cxCodeWritten === 'true';
+      delete element.dataset.cxCodeWrite;
+      delete element.dataset.cxCodeWritten;
+      if (!written) throw new Error('此代码编辑器暂不支持安全写入，请手动复制答案');
+      return true;
+    }
+    if (target.kind === 'pre') throw new Error('答题区代码不可编辑，请手动复制答案');
+    if (target.kind === 'text') {
+      target.textarea.value = value;
+      this.dispatchChoiceEvents(target.textarea);
+      return true;
+    }
+    const html = `<pre style="white-space:pre-wrap">${this.escapeHtml(value)}</pre>`;
+    const ue = this.getUeEditorInstance(target.textarea?.id);
+    if (ue?.setContent) ue.setContent(html, false);
+    if (target.iframe?.contentDocument?.body) target.iframe.contentDocument.body.innerHTML = html;
+    if (target.textarea) {
+      target.textarea.value = html;
+      this.dispatchChoiceEvents(target.textarea);
+    }
+    return Boolean(ue || target.iframe || target.textarea);
   },
 
   extractOptions(container) {
@@ -388,6 +496,27 @@ const AIAnswerCore = {
       return false;
     }
 
+    if (!question.container?.isConnected) throw new Error('题目已变化，请刷新题目列表');
+    if (question.docRef) {
+      const current = this.parseQuestionContainer(question.container, question.docRef, question.sectionHeader);
+      if (!current || current.id !== question.id || current.title !== question.title ||
+          current.type !== question.type || JSON.stringify(current.options) !== JSON.stringify(question.options) ||
+          JSON.stringify(current.existingAnswer) !== JSON.stringify(question.existingAnswer)) {
+        throw new Error('题目内容已变化，请刷新题目列表');
+      }
+    }
+    if (question.editorState !== undefined && typeof AIChat !== 'undefined' &&
+        AIChat.editorState(question) !== question.editorState) {
+      throw new Error('答题区内容已变化，已拒绝覆盖');
+    }
+    if (question.type === 'programming') {
+      const current = this.readProgramContent(question.programTarget);
+      if (!question.programTarget || current !== question.answerDraft) {
+        throw new Error('答题区代码已变化或无法读取，已拒绝覆盖');
+      }
+      return this.writeProgramContent(question.programTarget, answer.answer);
+    }
+
     switch (question.type) {
       case 'sorting':
       case 'matching':
@@ -422,7 +551,6 @@ const AIAnswerCore = {
         targets.some(target => !question.matchingGroups.left.some(item => item.id === target.left)))) {
       throw new Error('连线题显示编号与答题控件无法对应');
     }
-
     if (!sorting && targets.every(target => target.select)) {
       return this.applyNativeMatchingAnswer(question, answer, targets, hidden, qid);
     }

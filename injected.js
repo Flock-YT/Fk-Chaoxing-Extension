@@ -6,6 +6,22 @@
 
   const LOG_PREFIX = '[Fk-Chaoxing]';
 
+  // Synchronous bridge to the page-owned CodeMirror 5 instance. DOM line nodes
+  // may be virtualized, so they must never be treated as the complete source.
+  document.addEventListener('CX_CODE_EDITOR_READ', event => {
+    const element = event.target;
+    const editor = element?.CodeMirror;
+    if (!editor?.getValue) return;
+    element.dataset.cxCodeValue = editor.getValue();
+  });
+  document.addEventListener('CX_CODE_EDITOR_WRITE', event => {
+    const element = event.target;
+    const editor = element?.CodeMirror;
+    if (!editor?.setValue || !element.hasAttribute('data-cx-code-write')) return;
+    editor.setValue(element.dataset.cxCodeWrite);
+    element.dataset.cxCodeWritten = 'true';
+  });
+
   /**
    * Remove restrictions from a specific element
    * Removes readonly/disabled attributes and event restriction attributes
