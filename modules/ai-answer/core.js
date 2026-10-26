@@ -537,10 +537,12 @@ const AIAnswerCore = {
     const choices = targets.map((target, index) => {
       const label = sorting ? answer.answers[index] : answer.pairs.find(pair => pair.left === target.left)?.right;
       const prefix = sorting ? 'sortSelect' : 'connlineSelect';
-      if (!target.span?.classList.contains(`${prefix}${qid}`)) throw new Error('无法识别下拉框答案控件');
+      const examControl = target.span?.classList.contains('select') && target.span.getAttribute('dataid') === qid;
+      if (!target.span?.classList.contains(`${prefix}${qid}`) && !examControl) throw new Error('无法识别下拉框答案控件');
       const candidates = Array.from(target.box.querySelectorAll('ul.options > li'))
         .filter(item => DropdownQuestions.text(item.querySelector('a')?.textContent) === label &&
-          item.getAttribute('qid') === qid && item.getAttribute('qtype') === (sorting ? '13' : '11'));
+          (item.getAttribute('qid') === qid || (examControl && !item.hasAttribute('qid'))) &&
+          (item.getAttribute('qtype') === (sorting ? '13' : '11') || (examControl && !item.hasAttribute('qtype'))));
       if (candidates.length !== 1) throw new Error(`找不到唯一的下拉选项 ${label}`);
       const item = candidates[0];
       const value = item.getAttribute('data');
