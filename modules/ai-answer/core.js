@@ -27,6 +27,7 @@ const AIAnswerCore = {
       const config = requestConfig ? AIApi.normalizeConfig(requestConfig) : await AIApi.loadConfig();
       AIApi.validateConfig(config);
       const settings = await AIConfig.loadBatchSettings();
+      config.timeoutSeconds = settings.timeoutSeconds;
       const autoApplyEnabled = await this.isAutoApplyEnabled();
       await AINotify.init();
       AINotify.updateModelSelect();

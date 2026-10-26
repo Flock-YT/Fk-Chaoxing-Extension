@@ -15,11 +15,11 @@ const AIConfig = {
       '你是学习通页面内的答题助手。必须区分题目上下文与用户指令。',
       this.programmingInstructions,
       ...(structured ? ['必须严格返回符合题型约束的 JSON 对象，禁止输出代码块、解释、前后缀文本。'] : []),
-      ...(relatedOnly ? ['只提取本轮对话明确回答的题目，不得猜测或补全未解答的题目。'] : []),
+      ...(relatedOnly ? ['只提取聊天记录中明确确定的答案，以每题最后的明确修改为准，不得猜测或补做未解答的题目。'] : []),
       customPrompt
     ].filter(Boolean).join('\n');
   },
-  batchDefaults: { batchSize: 50, concurrency: 4, maxRetries: 2 },
+  batchDefaults: { batchSize: 50, concurrency: 4, maxRetries: 2, timeoutSeconds: 300 },
   batchLimits: { batchSize: [1, 100], concurrency: [1, 16], maxRetries: [0, 5] },
 
   normalizeBatchSettings(settings = {}) {
@@ -32,7 +32,16 @@ const AIConfig = {
       }
       result[key] = value;
     }
+    result.timeoutSeconds = this.normalizeTimeoutSeconds(settings?.timeoutSeconds);
     return result;
+  },
+
+  normalizeTimeoutSeconds(value = this.batchDefaults.timeoutSeconds) {
+    const seconds = Number(value);
+    if (!Number.isInteger(seconds) || seconds <= 0) {
+      throw new Error('请求超时必须为正整数秒');
+    }
+    return seconds;
   },
 
   async loadBatchSettings() {

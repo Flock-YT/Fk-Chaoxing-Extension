@@ -13,6 +13,7 @@ const AIApi = {
     const payload = {
       questions: questions.map((question, index) => ({
         questionIndex: index + 1,
+        pageIndex: question.index || index + 1,
         type: question.type,
         title: question.title,
         parentTitle: question.parentTitle || '',
@@ -43,6 +44,7 @@ const AIApi = {
       '}',
       '',
       '答题约束：',
+      '- pageIndex 为页面题号，questionIndex 为当前批次序号；返回答案时使用 questionIndex。',
       '- `fill_blank` 必须返回 `answers` 数组，数组长度必须等于 blankCount。',
       '- `single_choice` 必须返回 `answer` 字段，只能是单个大写选项字母，例如 A。',
       '- `multiple_choice` 必须返回 `answers` 数组，数组元素必须是大写选项字母。',
@@ -52,7 +54,7 @@ const AIApi = {
       '- `sorting` 必须返回 `answers` 数组，按题目要求从左到右排列全部选项字母，每个选项恰好一次，禁止按字母重新排序。',
       '- `matching` 必须返回 `pairs` 数组，left 使用第1组的显示编号，right 使用第2组的显示字母；每个左侧项目恰好一次，右侧选项可重复。',
       relatedOnly
-        ? '- 只提取本轮用户提问和助手回复中明确解答的题目；不要根据题干自行推断或补全答案。'
+        ? '- 只提取聊天记录中已明确确定的答案；同一题有修改时采用最后明确的答案，不要根据题干自行推断或补做。'
         : '- 如果无法确定，请尽量给出最可能答案，但仍然必须遵守 JSON 结构。',
       ...(relatedOnly ? [
         '- 如果回复与题目无关，返回 {"related":false}。',
@@ -106,12 +108,14 @@ const AIApi = {
     const config = requestConfig ? this.normalizeConfig(requestConfig) : await this.loadConfig();
     const prompt = `${this.buildPrompt(questions, relatedOnly)}\n\n用户提示词：\n${config.userPrompt}${conversationReply ? `\n\n${conversationReply}` : ''}`;
     this.validateConfig(config);
+    const timeoutSeconds = config.timeoutSeconds ?? (await AIConfig.loadBatchSettings()).timeoutSeconds;
 
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({
         type: 'AI_API_REQUEST',
         data: {
           config,
+          timeoutSeconds,
           messages: [
             {
               role: 'system',

@@ -1,6 +1,6 @@
 // In-page assistant. The AI-practice conversation in dialogue.js has its own port and state.
 const AIChat = {
-  root: null, questions: [], history: [], pending: null, extracting: false, selected: new Set(),
+  root: null, questions: [], history: [], pending: null, selected: new Set(),
   frameQuestions: new Map(), remoteWindows: new Map(), replies: new Map(), scanToken: '',
   quickEffort: null, historyKey: '', opening: null, frameId: `${Date.now()}-${Math.random()}`, launcher: null,
   pageKey() { return `aiChat:${location.origin}${location.pathname}${location.search}`; },
@@ -112,8 +112,8 @@ const AIChat = {
       <div id="questions"></div><div class="target-row"><label for="target">作答目标</label><select id="target"><option value="all">所选全部题目</option></select></div>
       <p id="context-note"></p>
       <details id="preview-panel"><summary>查看发送内容</summary><pre id="preview-text"></pre></details></details>
-      <div id="references"></div><textarea id="input" rows="3" placeholder="询问题目，或描述希望怎样作答…"></textarea>
-      <div class="actions"><label><input id="auto" type="checkbox">自动写入</label><button id="preview">预览</button><button id="regenerate" title="重新生成上一轮回复">重新生成</button><button id="stop" hidden>停止</button><button id="chat">发送</button><button id="answer">生成答案</button></div><div id="status" role="status" hidden></div></main></div>`;
+      <div id="references"></div><textarea id="input" rows="3" placeholder="留空可直接生成并填写答案；输入内容可先讨论，再点击“填入答案”…"></textarea>
+      <div class="actions"><button id="preview">预览</button><button id="regenerate" title="重新执行上一轮操作">重新生成</button><button id="stop" hidden>停止</button><button id="fill" disabled>填入答案</button><button id="send">生成答案</button></div><div id="status" role="status" hidden></div></main></div>`;
     this.root.append(panel);
     this.el('minimize').onclick = () => {
       const minimized = host.classList.toggle('minimized');
@@ -150,44 +150,45 @@ const AIChat = {
       this.renderQuestions();
     };
     this.el('target').onchange = () => this.updateContextSummary();
-    this.el('chat').onclick = () => this.send('chat');
-    this.el('answer').onclick = () => this.send('answer');
+    this.el('send').onclick = () => this.send();
+    this.el('fill').onclick = () => this.send('extract');
+    this.el('input').oninput = () => this.updateActions();
     this.el('input').onkeydown = event => {
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
-        event.preventDefault(); this.send('chat');
+        event.preventDefault(); this.send();
       }
     };
     this.el('regenerate').onclick = () => this.regenerate();
     this.el('preview').onclick = async () => {
       const config = await AIApi.loadConfig();
+      if (this.quickEffort !== null) config.reasoningEffort = this.quickEffort;
       const context = this.chosen().map(q => this.snapshot(q));
       const target = this.targets(this.chosen()).map(q => this.snapshot(q));
       const settings = await AIConfig.loadBatchSettings();
       const request = { input: this.el('input').value.trim(), context, target,
         contextScope: this.el('all').checked ? 'all' : 'selected' };
+      const mode = request.input ? 'chat' : 'answer';
       const preview = mode => this.batchRequests({ ...request, mode }, settings.batchSize)
         .map(batch => ({ questions: this.batchLabel(batch), messages: this.messages(config, batch) }));
       this.el('preview-text').textContent = JSON.stringify({ ...settings,
-        chat: preview('chat'), answer: target.length ? preview('answer') : [] }, null, 2);
+        operation: mode, requests: preview(mode),
+        fill: this.hasChatReply() && target.length ? preview('extract') : [] }, null, 2);
       this.el('question-panel').open = true;
       this.el('preview-panel').open = true;
     };
     this.el('stop').onclick = () => {
       this.pending?.controller.abort();
-      this.task('正在停止，已发出的答案提取请求结束后将丢弃结果。');
+      this.task('正在停止请求和后续填写。');
     };
-    this.el('auto').onchange = async event => chrome.storage.local.set({ autoApplyAnswers: event.target.checked });
-    chrome.storage.local.get('autoApplyAnswers').then(data => { this.el('auto').checked = data.autoApplyAnswers === true; });
     chrome.storage.onChanged.addListener(async (changes, area) => {
       if (area !== 'local' || !this.root) return;
-      if (changes.autoApplyAnswers) this.el('auto').checked = changes.autoApplyAnswers.newValue === true;
       if (changes.activeAiProfileId || changes.aiProfiles) {
         await this.loadModels();
       }
     });
   },
   async refresh() {
-    if (this.pending || this.extracting) return;
+    if (this.pending) return;
     await this.scanQuestions();
     this.selected = new Set(this.questions.map((_, index) => index));
     this.renderQuestions();
@@ -245,7 +246,7 @@ const AIChat = {
       target.append(new Option(`${index + 1}. ${q.title.slice(0, 28)}`, String(index)));
     });
     if (Array.from(target.options).some(option => option.value === previousTarget)) target.value = previousTarget;
-    this.el('context-note').textContent = `${this.questions.length} 道题；请求按总体设置分批；生成答案优先引用当前批次的目标题及限额内的辅助题目。程序题会附带可读取的现有代码。`;
+    this.el('context-note').textContent = `${this.questions.length} 道题；请求按总体设置分批。留空生成并填写，输入内容只聊天，讨论后可点击“填入答案”。程序题会附带可读取的现有代码。`;
     this.updateContextSummary();
   },
   updateContextSummary() {
@@ -254,6 +255,7 @@ const AIChat = {
     this.el('references').replaceChildren();
     const context = this.chosen().map(q => this.snapshot(q));
     if (context.length) this.el('references').append(this.reference(context, this.targets(this.chosen()), true));
+    this.updateActions();
   },
   chosen() { return this.questions.filter((_, index) => this.el('all').checked || this.selected.has(index)); },
   targets(context) {
@@ -286,6 +288,7 @@ const AIChat = {
       const empty = document.createElement('p'); empty.className = 'empty-state';
       empty.textContent = '引用本页题目，询问答案、解析或解题方法。'; feed.append(empty);
     }
+    this.updateActions();
   },
   reference(context, target = [], removable = false, scope) {
     const wrapper = document.createElement('div'); wrapper.className = 'reference';
@@ -327,20 +330,20 @@ const AIChat = {
     const name = document.createElement('b'); name.textContent = modelLabel || 'AI';
     const body = document.createElement('pre'); body.textContent = text || '';
     if (role === 'assistant') box.append(name);
-    if (role === 'user' && request?.context?.length) box.append(this.reference(request.context, request.mode === 'answer' ? request.target : [], false, request.contextScope || 'selected'));
+    if (role === 'user' && request?.context?.length) box.append(this.reference(request.context, request.mode !== 'chat' ? request.target : [], false, request.contextScope || 'selected'));
     box.append(body); this.el('feed').append(box); box.scrollIntoView({ block: 'end' });
     return { box, body };
   },
   questionKey(question) { return `${question.index}:${question.id}`; },
   batchRequests(request, batchSize) {
-    const questions = request.mode === 'answer' ? request.target : request.context;
+    const questions = request.mode !== 'chat' ? request.target : request.context;
     const targetKeys = new Set(request.target.map(q => this.questionKey(q)));
     const extraContext = request.context.filter(q => !targetKeys.has(this.questionKey(q)));
     const batches = [];
     for (let offset = 0; offset < questions.length; offset += batchSize) {
       const batch = questions.slice(offset, offset + batchSize);
       const keys = new Set(batch.map(q => this.questionKey(q)));
-      const context = request.mode === 'answer'
+      const context = request.mode !== 'chat'
         ? [...batch, ...extraContext.slice(0, batchSize - batch.length)].sort((a, b) => a.index - b.index) : batch;
       batches.push({ ...request, context, target: request.target.filter(q => keys.has(this.questionKey(q))),
         contextScope: context.length === request.context.length ? request.contextScope : 'selected' });
@@ -348,7 +351,7 @@ const AIChat = {
     return batches.length ? batches : [{ ...request, context: [], target: [] }];
   },
   batchLabel(request) {
-    const questions = request.mode === 'answer' ? request.target : request.context;
+    const questions = request.mode !== 'chat' ? request.target : request.context;
     return questions.length ? `第 ${questions[0].index}${questions.length > 1 ? `–${questions.at(-1).index}` : ''} 题` : '对话';
   },
   async retryRequest(work, maxRetries, job, label) {
@@ -370,33 +373,38 @@ const AIChat = {
     }
   },
   async send(mode, prior) {
-    if (this.pending || this.extracting) return;
-    const context = JSON.parse(JSON.stringify(prior?.context || this.chosen().map(q => this.snapshot(q))));
-    const target = JSON.parse(JSON.stringify(prior?.target || this.targets(this.chosen()).map(q => this.snapshot(q))));
+    if (this.pending) return;
     const input = prior?.input ?? this.el('input').value.trim();
+    mode ??= input ? 'chat' : 'answer';
+    if (mode === 'extract' && this.el('input').value.trim()) return this.task('请先发送输入框中的内容，再填入答案。', 'error');
+    if (mode === 'extract' && !this.hasChatReply()) return this.task('请先与模型讨论并确定答案。', 'error');
+    const snapshots = items => items.map(item => this.snapshot(this.questions.find(q => this.questionKey(q) === this.questionKey(item)) || item));
+    const context = JSON.parse(JSON.stringify(snapshots(prior?.context || this.chosen())));
+    const target = JSON.parse(JSON.stringify(snapshots(prior?.target || this.targets(this.chosen()))));
     if (!input && !context.length && mode === 'chat') return;
-    if (mode === 'answer' && !target.length) return this.task('请先选择作答目标', 'error');
+    if (mode !== 'chat' && !target.length) return this.task('请先选择作答目标', 'error');
     const config = await AIApi.loadConfig();
     if (this.quickEffort !== null) config.reasoningEffort = this.quickEffort;
     try { AIApi.validateConfig(config); } catch (error) { return this.task(error.message, 'error'); }
     const settings = await AIConfig.loadBatchSettings();
-    if (this.pending || this.extracting) return;
-    const request = { mode, input, context, target, autoApply: prior?.autoApply ?? this.el('auto').checked,
+    if (this.pending) return;
+    const request = { mode, input, context, target,
       contextScope: prior?.contextScope || (this.el('all').checked ? 'all' : 'selected'), configId: config.id, regenerate: Boolean(prior) };
     const history = prior ? this.history.slice(0, this.history.findLastIndex(item => item.role === 'user' && item.request)) : this.history.slice();
     const batches = this.batchRequests(request, settings.batchSize);
-    const job = { controller: new AbortController(), completed: 0, failures: [], failedQuestions: new Set(), offered: 0, written: 0,
-      applyQueue: Promise.resolve() };
+    const job = { controller: new AbortController(), completed: 0, failures: [], failedQuestions: new Set(),
+      unansweredQuestions: new Set(), offered: 0, written: 0, timeoutSeconds: settings.timeoutSeconds, applyQueue: Promise.resolve() };
     this.pending = job;
     this.setBusy(true);
     try {
       if (!prior) {
-        this.history.push({ role: 'user', text: input || '请解答所选题目', request });
-        this.addBubble('user', input || '请解答所选题目', '', request);
+        const text = mode === 'extract' ? '请填入聊天中已确定的答案' : input || '请解答所选题目并填入答案';
+        this.history.push({ role: 'user', text, request });
+        this.addBubble('user', text, '', request);
         this.el('input').value = '';
         await this.persist();
       }
-      this.task(`共 ${batches.length} 批，每批最多引用 ${settings.batchSize} 题，同时处理 ${Math.min(settings.concurrency, batches.length)} 批。`);
+      this.task(`共 ${batches.length} 批，每批最多引用 ${settings.batchSize} 题，同时处理 ${Math.min(settings.concurrency, batches.length)} 批，每次请求最多等待 ${settings.timeoutSeconds} 秒。`);
       let nextBatch = 0;
       const worker = async () => {
         while (nextBatch < batches.length && !job.controller.signal.aborted) {
@@ -406,19 +414,24 @@ const AIChat = {
           const assistant = this.addBubble('assistant', '', batches.length > 1 ? `${modelLabel} · ${label}` : modelLabel);
           const thoughtView = this.addThought(assistant);
           try {
-            const done = await this.retryRequest(() => this.streamReply(config, batch, history, job, assistant, thoughtView),
-              settings.maxRetries, job, `${label}生成`);
-            this.history.push({ role: 'assistant', text: done.text, thought: done.thought,
+            // The same request generates the answer and its structure; validation runs locally.
+            const done = await this.retryRequest(async () => {
+              const reply = await this.streamReply(config, batch, history, job, assistant, thoughtView);
+              job.controller.signal.throwIfAborted();
+              const entries = mode === 'chat' ? null : this.parseAnswerEntries(reply.text, batch);
+              return { ...reply, entries };
+            }, settings.maxRetries, job, `${label}${mode === 'extract' ? '答案提取' : '生成'}`);
+            this.history.push({ role: 'assistant', text: done.text, thought: done.thought, mode,
               modelLabel, reasoningEffort: config.reasoningEffort, questionKeys: batch.context.map(q => this.questionKey(q)) });
-            const shouldExtract = mode === 'answer' || (request.autoApply && batch.context.length && batch.target.length);
-            if (shouldExtract) {
-              this.task(`${label}：正在提取可校验答案。`);
-              const entries = await this.retryRequest(() => this.extractAnswers(done.text, batch, config),
-                settings.maxRetries, job, `${label}答案提取`);
+            if (done.entries) {
+              if (mode === 'extract') {
+                const answered = new Set(done.entries.map(entry => entry.index));
+                batch.target.forEach((q, index) => { if (!answered.has(index)) job.unansweredQuestions.add(q.index); });
+              }
               // API requests can finish out of order; page writes remain serial.
               const offer = job.applyQueue.then(() => {
                 job.controller.signal.throwIfAborted();
-                return this.offerAnswers(entries, batch, job);
+                return this.offerAnswers(done.entries, batch, job);
               });
               job.applyQueue = offer.catch(() => {});
               await offer;
@@ -438,7 +451,8 @@ const AIChat = {
       this.task(`${job.controller.signal.aborted ? '已停止' : '处理结束'}：完成 ${job.completed}/${batches.length} 批` +
         `${job.offered ? `，提供 ${job.offered} 道题答案，写入 ${job.written} 道题` : ''}` +
         `${job.failures.length ? `；失败：${job.failures.join('、')}，可重新选择这些题目重试` : ''}` +
-        `${job.failedQuestions.size ? `；第 ${[...job.failedQuestions].join('、')} 题未提供候选答案或写入失败，请刷新题目后重试` : ''}。`,
+        `${job.unansweredQuestions.size ? `；第 ${[...job.unansweredQuestions].join('、')} 题在聊天中未确定答案，未填写` : ''}` +
+        `${job.failedQuestions.size ? `；第 ${[...job.failedQuestions].join('、')} 题写入失败，请刷新题目后重试` : ''}。`,
         job.failures.length || job.failedQuestions.size ? 'error' : 'info');
     } catch (error) { this.task(error.message, 'error'); }
     finally {
@@ -457,11 +471,12 @@ const AIChat = {
       ? '当前选择不思考；若模型仍返回可展示内容，会实时显示在这里。' : '正在等待模型返回思考内容…';
     return new Promise((resolve, reject) => {
       const port = chrome.runtime.connect({ name: 'AI_CHAT_STREAM' });
-      let finished = false;
+      let finished = false, keepAliveTimer;
       let text = '', thought = '';
       const complete = error => {
         if (finished) return;
         finished = true;
+        clearInterval(keepAliveTimer);
         signal.removeEventListener('abort', cancel);
         thoughtView.entry.open = false;
         thoughtView.label.textContent = '思考过程';
@@ -469,7 +484,11 @@ const AIChat = {
         port.disconnect();
         if (error) reject(error); else resolve({ text, thought });
       };
-      const cancel = () => { port.postMessage({ type: 'cancel' }); complete(signal.reason); };
+      const cancel = () => {
+        try { port.postMessage({ type: 'cancel' }); }
+        catch (error) { /* The port may already be disconnected. */ }
+        complete(signal.reason);
+      };
       signal.addEventListener('abort', cancel, { once: true });
       port.onMessage.addListener(message => {
         if (finished) return;
@@ -491,15 +510,31 @@ const AIChat = {
       port.onDisconnect.addListener(() => {
         if (!finished) complete(Object.assign(new Error(chrome.runtime.lastError?.message || '流式连接中断'), { retryable: true }));
       });
-      port.postMessage({ type: 'start', messages: this.messages(config, request, history),
-        reasoningEffort: config.reasoningEffort, profileId: config.id });
+      try {
+        keepAliveTimer = setInterval(() => {
+          try { port.postMessage({ type: 'ping' }); }
+          catch (error) { complete(Object.assign(error, { retryable: true })); }
+        }, 20000);
+        port.postMessage({ type: 'start', messages: this.messages(config, request, history),
+          reasoningEffort: config.reasoningEffort, profileId: config.id, timeoutSeconds: job.timeoutSeconds });
+      } catch (error) { complete(error); }
     });
   },
-  messages(config, request, history = this.history) {
+  conversationHistory(history = this.history) {
+    let chatting = false;
+    return history.filter(item => {
+      if (item.role === 'user') chatting = item.request?.mode === 'chat';
+      return chatting && (item.role !== 'assistant' || !item.mode || item.mode === 'chat');
+    });
+  },
+  hasChatReply() {
+    return this.conversationHistory().some(item => item.role === 'assistant' && item.text?.trim());
+  },
+  historyMessages(request, history, extracting = false) {
     const keys = new Set(request.context.map(q => this.questionKey(q)));
     const recent = [];
     let includeReply = false, includeLegacyReply = false;
-    for (const item of history.slice(-12)) {
+    for (const item of extracting ? this.conversationHistory(history) : history.slice(-12)) {
       if (item.role === 'user' && item.request) {
         const context = item.request.context.filter(q => keys.has(this.questionKey(q)));
         includeReply = !item.request.context.length || context.length > 0;
@@ -508,36 +543,53 @@ const AIChat = {
           const target = item.request.target.filter(q => keys.has(this.questionKey(q)));
           recent.push({ role: 'user', content: AIApi.withImages(this.requestText({ ...item.request, context, target }), context) });
         }
-      } else if (item.questionKeys ? item.questionKeys.every(key => keys.has(key)) : includeReply && includeLegacyReply) {
-        recent.push({ role: item.role, content: item.text });
+      } else if (item.questionKeys
+        ? (extracting ? item.questionKeys.some(key => keys.has(key)) || !item.questionKeys.length : item.questionKeys.every(key => keys.has(key)))
+        : includeReply && includeLegacyReply) {
+        const scope = extracting && item.questionKeys?.length ? `本条回复原引用的页面题号：${item.questionKeys.map(key => key.split(':')[0]).join('、')}\n` : '';
+        recent.push({ role: item.role, content: scope + item.text });
       }
     }
-    return [{ role: 'system', content: AIConfig.buildSystemPrompt(config.systemPrompt) }, ...recent,
+    return recent;
+  },
+  messages(config, request, history = this.history) {
+    const structured = request.mode !== 'chat';
+    const relatedOnly = request.mode === 'extract';
+    return [{ role: 'system', content: AIConfig.buildSystemPrompt(config.systemPrompt, { structured, relatedOnly }) },
+      ...this.historyMessages(request, history, relatedOnly),
       { role: 'user', content: AIApi.withImages(this.requestText(request, config.userPrompt), request.context) }];
   },
   requestText(request, userPrompt = '') {
+    if (request.mode !== 'chat') {
+      const targetKeys = new Set(request.target.map(q => this.questionKey(q)));
+      const extra = request.context.filter(q => !targetKeys.has(this.questionKey(q)));
+      return `${AIApi.buildPrompt(request.target, request.mode === 'extract')}\n\n辅助题目上下文：\n${JSON.stringify(extra, null, 2)}\n\n` +
+        (request.mode === 'extract'
+          ? '请根据上面的聊天记录提取已确定的答案，按 pageIndex 对应页面题号，按 questionIndex 返回当前批次序号。只输出 JSON，不得补做未解答题目。'
+          : `用户提示词：\n${userPrompt}\n\n${request.input || '请直接解答作答目标并返回完整 JSON。'}`);
+    }
     const scope = request.contextScope === 'all' ? '全部题目' : request.context.length === 1 ? '单题' : '勾选多题';
     const reference = request.context.length ? `${scope}，第 ${request.context.map(q => q.index).join('、')} 题` : '无题目引用';
-    return `引用范围：${reference}\n题目上下文：\n${JSON.stringify(request.context, null, 2)}\n\n用户提示词：\n${userPrompt}\n\n本轮输入：\n${request.input || '请解答指定题目'}\n\n作答目标：\n${JSON.stringify(request.mode === 'answer' ? request.target : [], null, 2)}`;
+    return `引用范围：${reference}\n题目上下文：\n${JSON.stringify(request.context, null, 2)}\n\n用户提示词：\n${userPrompt}\n\n本轮输入：\n${request.input || '请解答指定题目'}`;
   },
   async regenerate() {
-    if (this.pending || this.extracting) return;
+    if (this.pending) return;
     const prior = [...this.history].reverse().find(item => item.role === 'user' && item.request)?.request;
     if (!prior) return this.task('没有可重新生成的请求', 'error');
     await this.send(prior.mode, prior);
   },
-  async extractAnswers(text, request, config) {
-    const relatedOnly = request.mode === 'chat';
-    const raw = await AIApi.getAnswers(request.target, config,
-      `本轮用户提问：\n${request.input || '请解答指定题目'}\n\n本轮助手回复：\n${text}`, relatedOnly);
+  parseAnswerEntries(text, request) {
+    if (request.mode === 'answer') return AIApi.parseAnswers(text, request.target).map((answer, index) => ({ index, answer }));
     try {
-      if (!relatedOnly) return AIApi.parseAnswers(raw, request.target).map((answer, index) => ({ index, answer }));
-      const result = JSON.parse(AIApi.stripCodeFence(raw));
-      if (result.related === false) return [];
+      const result = JSON.parse(AIApi.stripCodeFence(text));
+      if (result.related === false) {
+        if (result.answers !== undefined && (!Array.isArray(result.answers) || result.answers.length)) throw new Error('AI 返回的答案与关联标记冲突');
+        return [];
+      }
       if (!Array.isArray(result.answers)) throw new Error('AI 未返回可校验答案');
       const indices = result.answers.map(item => Number(item?.questionIndex));
       if (new Set(indices).size !== indices.length || indices.some(index => !Number.isInteger(index) || index < 1 || index > request.target.length)) {
-        throw new Error('AI 返回的题号不完整或重复');
+        throw new Error('AI 返回的题号越界或重复');
       }
       return result.answers.map(entry => ({
         index: Number(entry.questionIndex) - 1,
@@ -600,16 +652,25 @@ const AIChat = {
       };
       card.append(code, apply); this.el('feed').append(card);
       job.offered++;
-      if (request.autoApply) await apply.onclick();
+      await apply.onclick();
     }
   },
   task(message, type = 'info') {
     if (!this.root) return;
     const status = this.el('status'); status.hidden = false; status.className = type; status.textContent = message;
   },
-  setBusy(value, allowStop = true) {
-    for (const id of ['chat', 'answer', 'regenerate', 'refresh']) this.el(id).disabled = value;
-    this.el('stop').hidden = !value || !allowStop;
+  updateActions() {
+    const input = this.el('input').value.trim();
+    const hasTarget = this.targets(this.chosen()).length > 0;
+    this.el('send').textContent = input ? '发送' : '生成答案';
+    this.el('send').disabled = Boolean(this.pending) || (!input && !hasTarget);
+    this.el('fill').disabled = Boolean(this.pending) || !hasTarget || !this.hasChatReply();
+    this.el('regenerate').disabled = Boolean(this.pending) || !this.history.some(item => item.role === 'user' && item.request);
+  },
+  setBusy(value) {
+    this.updateActions();
+    this.el('refresh').disabled = value;
+    this.el('stop').hidden = !value;
   },
   applyRemote(q, snap, answer) {
     const target = this.remoteWindows.get(q.remote);

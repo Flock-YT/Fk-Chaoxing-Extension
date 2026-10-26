@@ -74,7 +74,7 @@ chrome.runtime.onConnect.addListener(port => {
       if (!finished) port.postMessage({ type: 'delta', delta });
     }, port.name === 'AI_CHAT_STREAM' ? delta => {
       if (!finished) port.postMessage({ type: 'thought', delta });
-    } : undefined, port.name === 'AI_CHAT_STREAM' ? message.profileId : undefined)
+    } : undefined, port.name === 'AI_CHAT_STREAM' ? message.profileId : undefined, message.timeoutSeconds)
       .then(() => complete({ type: 'done' }))
       .catch(error => {
         if (!finished) complete({ type: 'error', message: error.message, retryable: error.retryable === true });
@@ -87,7 +87,7 @@ chrome.runtime.onConnect.addListener(port => {
   });
 });
 
-async function streamDialogueReply(messages, reasoningEffort, controller, onDelta, onThought, profileId) {
+async function streamDialogueReply(messages, reasoningEffort, controller, onDelta, onThought, profileId, timeoutSeconds) {
   if (!Array.isArray(messages) || !messages.length ||
       messages.some(item => !['system', 'user', 'assistant'].includes(item?.role) || !validMessageContent(item))) {
     throw new Error('对话内容无效');
@@ -109,11 +109,13 @@ async function streamDialogueReply(messages, reasoningEffort, controller, onDelt
     throw new Error('尚未授权模型 API 域名，请在插件弹窗重新保存或切换模型以授权');
   }
 
+  timeoutSeconds = AIConfig.normalizeTimeoutSeconds(timeoutSeconds ?? (await AIConfig.loadBatchSettings()).timeoutSeconds);
+  controller.signal.throwIfAborted();
   let timedOut = false;
   const timeout = setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, 180000);
+  }, timeoutSeconds * 1000);
   try {
     const response = await fetch(apiUrl.toString(), {
       method: 'POST',
@@ -131,7 +133,7 @@ async function streamDialogueReply(messages, reasoningEffort, controller, onDelt
     }
     await AIStream.consume(response.body, config.apiType, onDelta, onThought);
   } catch (err) {
-    if (timedOut) throw retryableError('AI API 请求超时（180 秒）');
+    if (timedOut) throw retryableError(`AI API 请求超时（${timeoutSeconds} 秒）`);
     if (err instanceof TypeError) err.retryable = true;
     throw err;
   } finally {
@@ -165,8 +167,13 @@ async function callOpenAICompatibleAPI(data) {
     throw new Error('请先配置模型 ID');
   }
 
+  const timeoutSeconds = AIConfig.normalizeTimeoutSeconds(data.timeoutSeconds ?? (await AIConfig.loadBatchSettings()).timeoutSeconds);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 180000);
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutSeconds * 1000);
   let response;
   try {
     response = await fetch(buildApiUrl(config), {
@@ -196,11 +203,7 @@ async function callOpenAICompatibleAPI(data) {
     }
     return extractResponseText(result, config.apiType);
   } catch (err) {
-    if (err.name === 'AbortError') {
-      const error = new Error('AI API 请求超时（180 秒）');
-      error.retryable = true;
-      throw error;
-    }
+    if (timedOut) throw retryableError(`AI API 请求超时（${timeoutSeconds} 秒）`);
     if (err instanceof TypeError) err.retryable = true;
     throw err;
   } finally {

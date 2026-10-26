@@ -76,9 +76,6 @@
           <i class="ri-openai-fill" id="btn-ai-icon-default"></i>
           <span id="btn-ai-text">AI 答题</span>
         </button>
-        <button class="btn btn-outline" id="btn-auto-apply-toggle">
-          <span id="btn-auto-apply-text">自动作答：关闭</span>
-        </button>
       </div>
     </section>
 
@@ -129,7 +126,12 @@
           <div class="setting-field">
             <label for="ai-max-retries">失败重试次数</label>
             <input id="ai-max-retries" class="form-control" type="number" min="0" max="5" step="1" inputmode="numeric">
-            <p>生成回复和提取答案分别重试临时错误；0 表示不重试。</p>
+            <p>网络或答案格式错误时重试当前批次；0 表示不重试。</p>
+          </div>
+          <div class="setting-field">
+            <label for="ai-timeout-seconds">请求超时（秒）</label>
+            <input id="ai-timeout-seconds" class="form-control" type="number" min="1" step="1" inputmode="numeric">
+            <p>默认 300 秒，包含模型思考和输出的总时长，对所有模型生效。</p>
           </div>
           <p id="batch-settings-error" class="field-error" role="alert" hidden></p>
           <button id="btn-batch-save" class="btn btn-primary" type="button">保存答题设置</button>

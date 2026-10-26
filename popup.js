@@ -9,8 +9,6 @@ class PopupController {
     this.pluginToggleEl = document.getElementById('plugin-toggle');
     this.btnExtractAuto = document.getElementById('btn-extract-auto');
     this.btnAiAnswer = document.getElementById('btn-ai-answer');
-    this.btnAutoApplyToggle = document.getElementById('btn-auto-apply-toggle');
-    this.btnAutoApplyText = document.getElementById('btn-auto-apply-text');
     this.btnAiText = document.getElementById('btn-ai-text');
     this.aiQuickReasoning = document.getElementById('ai-quick-reasoning');
     this.aiProfileName = document.getElementById('ai-profile-name');
@@ -30,13 +28,12 @@ class PopupController {
     this.currentView = 'home';
     this.currentTab = null;
     this.isEnabled = true;
-    this.autoApplyAnswers = false;
     this.init();
   }
 
   async init() {
     this.bindEvents();
-    await Promise.all([this.loadPluginState(), this.loadAutoApplyState(), this.loadBatchSettings()]);
+    await Promise.all([this.loadPluginState(), this.loadBatchSettings()]);
     const draft = await this.loadAiProfiles();
     await this.getCurrentTab();
     this.detectPageType();
@@ -161,6 +158,7 @@ class PopupController {
     document.getElementById('ai-batch-size').value = settings.batchSize;
     document.getElementById('ai-concurrency').value = settings.concurrency;
     document.getElementById('ai-max-retries').value = settings.maxRetries;
+    document.getElementById('ai-timeout-seconds').value = settings.timeoutSeconds;
   }
 
   async saveBatchSettings() {
@@ -170,7 +168,8 @@ class PopupController {
       const settings = AIConfig.normalizeBatchSettings({
         batchSize: document.getElementById('ai-batch-size').value,
         concurrency: document.getElementById('ai-concurrency').value,
-        maxRetries: document.getElementById('ai-max-retries').value
+        maxRetries: document.getElementById('ai-max-retries').value,
+        timeoutSeconds: document.getElementById('ai-timeout-seconds').value
       });
       await chrome.storage.local.set({ aiBatchSettings: settings });
       this.log('success', '答题设置已保存');
@@ -322,7 +321,6 @@ class PopupController {
   updateButtonsState() {
     this.btnExtractAuto.disabled = !this.isEnabled;
     this.btnAiAnswer.disabled = !this.isEnabled;
-    this.btnAutoApplyToggle.disabled = !this.isEnabled;
   }
 
   async togglePluginState() {
@@ -330,24 +328,6 @@ class PopupController {
     await chrome.storage.local.set({ pluginEnabled: this.isEnabled });
     this.log(this.isEnabled ? 'success' : 'warning', `插件已${this.isEnabled ? '开启' : '关闭'}，刷新页面生效`);
     this.updateButtonsState();
-  }
-
-  async loadAutoApplyState() {
-    const data = await chrome.storage.local.get('autoApplyAnswers');
-    this.autoApplyAnswers = data.autoApplyAnswers === true;
-    this.updateAutoApplyButton();
-  }
-
-  updateAutoApplyButton() {
-    this.btnAutoApplyText.textContent = `自动作答：${this.autoApplyAnswers ? '开启' : '关闭'}`;
-    this.btnAutoApplyToggle.classList.toggle('active', this.autoApplyAnswers);
-  }
-
-  async toggleAutoApplyState() {
-    this.autoApplyAnswers = !this.autoApplyAnswers;
-    await chrome.storage.local.set({ autoApplyAnswers: this.autoApplyAnswers });
-    this.updateAutoApplyButton();
-    this.log('info', `自动作答已${this.autoApplyAnswers ? '开启' : '关闭'}`);
   }
 
   async getCurrentTab() {
@@ -457,7 +437,7 @@ class PopupController {
     on('btn-model-editor-back', 'click', () => this.navigate('models'));
     on('btn-ai-profile-new', 'click', () => this.openEditor());
     on('btn-batch-save', 'click', () => this.saveBatchSettings());
-    ['ai-batch-size', 'ai-concurrency', 'ai-max-retries'].forEach(id => {
+    ['ai-batch-size', 'ai-concurrency', 'ai-max-retries', 'ai-timeout-seconds'].forEach(id => {
       on(id, 'input', () => { document.getElementById('batch-settings-error').hidden = true; });
     });
     on('btn-ai-config-save', 'click', () => this.saveAiProfile());
@@ -487,7 +467,6 @@ class PopupController {
     on('ai-reasoning-effort', 'change', () => this.updateTemperatureState());
     on('btn-ai-answer', 'click', () => this.aiAnswer());
     on('btn-extract-auto', 'click', () => this.getQuestions());
-    on('btn-auto-apply-toggle', 'click', () => this.toggleAutoApplyState());
     on('plugin-toggle', 'change', () => this.togglePluginState());
     on('btn-refresh', 'click', () => chrome.runtime.reload());
     on('btn-clear-log', 'click', () => this.logContainer.replaceChildren());
@@ -499,10 +478,6 @@ class PopupController {
         this.renderAiProfileList();
         this.updateAiAnswerButton();
         if (!this.aiQuickReasoning.disabled) this.resetQuickReasoning();
-      }
-      if (changes.autoApplyAnswers) {
-        this.autoApplyAnswers = changes.autoApplyAnswers.newValue === true;
-        this.updateAutoApplyButton();
       }
       if (changes.aiBatchSettings && this.currentView === 'settings') this.loadBatchSettings();
     });
