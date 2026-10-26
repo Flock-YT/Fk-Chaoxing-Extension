@@ -120,7 +120,7 @@ Fk-Chaoxing-Extension/
 
 弹窗的“本次思考等级”会带入页面对话窗；对话窗顶部也可切换模型和本次思考等级。切换模型后会采用该模型的默认等级。已发起的请求保持原模型与等级。
 
-页面聊天、直接生成和主动提取答案均使用流式请求；连接测试及其他非流式入口共用同一套协议适配和结果解析。Responses 使用 `store: false`。思考内容在现有折叠区域实时显示，明确返回摘要时标注“思考摘要”，类型不明确时标注“思考内容”。思考文本、摘要、加密数据和签名不会混入答案或情境对话草稿。
+页面聊天、直接生成和主动提取答案均使用流式请求；连接测试及其他非流式入口共用同一套协议适配和结果解析。Responses 使用 `store: false`。思考区域默认折叠，可手动展开查看实时内容；请求期间显示“思考中”、转圈动画及秒数，首次收到答案正文后显示“已思考 N 秒”。耗时包含连接和等待时间，每批及每次重试独立计时；新记录保留耗时，旧记录显示“思考记录”。思考文本、摘要、加密数据和签名不会混入答案或情境对话草稿。
 
 请求构造和思考解析均由接口协议决定，无需选择厂商。Responses 统一发送 `reasoning.summary: "auto"` 请求思考摘要，并读取接口返回的思考文本和摘要事件；服务端不支持该参数时显示接口错误，不静默删除参数或重试。OpenAI 可展示的是摘要，完整内部思考不公开。Chat Completions 使用独立的协议解析，支持 `reasoning_content`、`reasoning`、`reasoning_details` 及 `<think>` 标签；Claude 读取 thinking 内容块，Gemini 读取 thought 内容。接口仅返回加密数据、隐藏内容、没有返回可展示文本及请求失败时，会分别说明；缺少思考文本不影响正常答题。旧配置中的厂商字段不再参与请求，原有地址、协议、模型 ID 和其他连接设置继续可读。[OpenAI 文档](https://developers.openai.com/api/docs/guides/reasoning)、[DeepSeek 文档](https://api-docs.deepseek.com/api/create-response/)、[Grok 文档](https://docs.x.ai/developers/model-capabilities/text/reasoning)、[中转字段示例](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)
 

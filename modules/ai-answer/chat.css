@@ -31,6 +31,12 @@
 :host pre { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; }
 :host .thought-entry { margin:0 0 12px; color:#63676c; font-size:13px; }
 :host .thought-entry summary { cursor:pointer; width:fit-content; }
+:host .thought-spinner { display:inline-block; width:11px; height:11px; vertical-align:-1px; border:1.5px solid #d8dadd; border-top-color:currentColor; border-radius:50%; animation:thought-spin .8s linear infinite; }
+:host .thought-elapsed { font-variant-numeric:tabular-nums; }
+@keyframes thought-spin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion:reduce) {
+  :host .thought-spinner { animation:none; }
+}
 :host .thought-entry pre { margin-top:8px; padding-left:12px; border-left:2px solid #e5e7eb; line-height:1.65; max-height:180px; overflow:auto; }
 :host .composer { flex:none; border-top:1px solid #e5e7eb; padding:12px; max-height:65%; overflow:auto; }
 :host #question-panel { margin-bottom:8px; font-size:12px; }

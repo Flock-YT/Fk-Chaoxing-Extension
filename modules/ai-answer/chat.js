@@ -283,7 +283,7 @@ const AIChat = {
       const bubble = this.addBubble(item.role, item.text, item.modelLabel ||
         (item.role === 'assistant' ? 'AI · 旧记录未保存模型' : ''), item.request);
       if (item.role === 'assistant' && (item.thought || item.thoughtStatus)) this.addThought(bubble,
-        item.thought || this.thoughtNote(item.thoughtStatus), false, item);
+        item.thought || this.thoughtNote(item.thoughtStatus), item);
     });
     if (!this.history.length) {
       const empty = document.createElement('p'); empty.className = 'empty-state';
@@ -318,20 +318,28 @@ const AIChat = {
     return wrapper;
   },
   typeLabel(type) { return ({ single_choice: '单选题', multiple_choice: '多选题', fill_blank: '填空题', short_answer: '简答题', programming: '程序题', sorting: '排序题', matching: '连线题' })[type] || type; },
-  thoughtLabel(blocks = [], legacy = false) {
-    return blocks.length && blocks.every(block => block.kind === 'summary') ? '思考摘要' : legacy ? '思考过程' : '思考内容';
-  },
   thoughtNote(status) {
     return { encrypted: '接口仅返回了加密思考数据，无法展示文本。', hidden: '接口隐藏了本次思考内容。',
       failed: '请求失败，未能获取完整思考内容。', cancelled: '已停止，思考内容未接收完成。'
     }[status] || '接口未返回可展示的思考内容。';
   },
-  addThought(bubble, text = '', open = true, metadata = {}) {
-    const entry = document.createElement('details'); entry.className = 'thought-entry'; entry.open = open;
-    const label = document.createElement('summary'); label.textContent = open ? '正在思考…' : this.thoughtLabel(metadata.thoughtBlocks, !metadata.thoughtStatus);
+  addThought(bubble, text = '', metadata = {}) {
+    const entry = document.createElement('details'); entry.className = 'thought-entry'; entry.open = false;
+    const label = document.createElement('summary');
+    label.title = '耗时从请求发出计至首次答案正文，包含连接和等待时间。';
+    const state = document.createElement('span');
+    const spinner = document.createElement('span'); spinner.className = 'thought-spinner'; spinner.hidden = true;
+    spinner.setAttribute('aria-hidden', 'true');
+    const elapsed = document.createElement('span'); elapsed.className = 'thought-elapsed';
+    const duration = metadata.thoughtDurationMs;
+    const hasDuration = Number.isFinite(duration) && duration >= 0;
+    state.textContent = hasDuration ? '已思考' : '思考记录';
+    elapsed.hidden = !hasDuration;
+    if (hasDuration) elapsed.textContent = `${Math.floor(duration / 1000)} 秒`;
+    label.append(state, ' ', spinner, ' ', elapsed);
     const body = document.createElement('pre'); body.textContent = text;
     entry.append(label, body); bubble.box.insertBefore(entry, bubble.body);
-    return { body, entry, label };
+    return { body, entry, label, state, spinner, elapsed };
   },
   addBubble(role, text, modelLabel = '', request) {
     this.el('feed').querySelector('.empty-state')?.remove();
@@ -432,6 +440,7 @@ const AIChat = {
             }, settings.maxRetries, job, `${label}${mode === 'extract' ? '答案提取' : '生成'}`);
             this.history.push({ role: 'assistant', text: done.text, thought: done.thought, mode,
               thoughtBlocks: done.thoughtBlocks, thoughtStatus: done.thoughtStatus, usage: done.usage, protocolState: done.protocolState,
+              thoughtDurationMs: done.thoughtDurationMs,
               modelLabel, reasoningEffort: config.reasoningEffort, questionKeys: batch.context.map(q => this.questionKey(q)) });
             if (done.entries) {
               if (mode === 'extract') {
@@ -451,7 +460,6 @@ const AIChat = {
           } catch (error) {
             if (job.controller.signal.aborted) break;
             job.failures.push(label);
-            thoughtView.entry.open = false;
             assistant.body.textContent += `\n\n${label}失败：${error.message}`;
           }
         }
@@ -474,27 +482,38 @@ const AIChat = {
     const signal = job.controller.signal;
     signal.throwIfAborted();
     assistant.body.textContent = '';
-    thoughtView.entry.open = true;
-    thoughtView.label.textContent = '正在思考…';
+    thoughtView.state.textContent = '思考中';
+    thoughtView.spinner.hidden = false;
+    thoughtView.elapsed.hidden = false;
+    thoughtView.elapsed.textContent = '0 秒';
     thoughtView.body.textContent = config.reasoningEffort === 'none'
       ? '当前选择不思考；若模型仍返回可展示内容，会实时显示在这里。' : '正在等待模型返回思考内容…';
     return new Promise((resolve, reject) => {
-      const port = chrome.runtime.connect({ name: 'AI_CHAT_STREAM' });
-      let finished = false, keepAliveTimer;
+      const startedAt = performance.now();
+      let port, finished = false, keepAliveTimer, thoughtTimer, thoughtDurationMs;
       let text = '', thought = '', thoughtStatus = 'not_returned', usage, protocolState;
       let thoughtBlocks = [];
+      const updateElapsed = () => {
+        thoughtView.elapsed.textContent = `${Math.floor((thoughtDurationMs ?? performance.now() - startedAt) / 1000)} 秒`;
+      };
+      const stopThinking = error => {
+        thoughtDurationMs ??= performance.now() - startedAt;
+        clearInterval(thoughtTimer);
+        thoughtView.spinner.hidden = true;
+        thoughtView.state.textContent = error ? error.name === 'AbortError' ? '已停止 ·' : '请求失败 ·' : '已思考';
+        updateElapsed();
+      };
       const complete = error => {
         if (finished) return;
         finished = true;
         clearInterval(keepAliveTimer);
         signal.removeEventListener('abort', cancel);
-        thoughtView.entry.open = false;
-        thoughtView.label.textContent = this.thoughtLabel(thoughtBlocks);
+        stopThinking(error);
         if (error) thoughtStatus = error.name === 'AbortError' ? 'cancelled' : 'failed';
         thoughtView.body.textContent = thought ? thought + (error ? `\n\n${this.thoughtNote(thoughtStatus)}` : '') : this.thoughtNote(thoughtStatus);
         assistant.body.textContent = text;
-        port.disconnect();
-        if (error) reject(error); else resolve({ text, thought, thoughtBlocks, thoughtStatus, usage, protocolState });
+        port?.disconnect();
+        if (error) reject(error); else resolve({ text, thought, thoughtBlocks, thoughtStatus, usage, protocolState, thoughtDurationMs });
       };
       const cancel = () => {
         try { port.postMessage({ type: 'cancel' }); }
@@ -502,42 +521,42 @@ const AIChat = {
         complete(signal.reason);
       };
       signal.addEventListener('abort', cancel, { once: true });
-      port.onMessage.addListener(message => {
-        if (finished) return;
-        if (message.type === 'delta') {
-          thoughtView.entry.open = false;
-          thoughtView.label.textContent = this.thoughtLabel(thoughtBlocks);
-          text += message.delta;
-          assistant.body.textContent = text;
-          assistant.box.scrollIntoView({ block: 'end' });
-        }
-        if (message.type === 'thought') {
-          if (message.blocks) thoughtBlocks = message.blocks;
-          else {
-            const id = message.blockId || 'legacy';
-            let block = thoughtBlocks.find(item => item.id === id);
-            if (!block) { block = { id, kind: message.kind || 'content', text: '' }; thoughtBlocks.push(block); }
-            block.text += message.delta;
-          }
-          thought = thoughtBlocks.map(item => item.text).join('\n\n');
-          thoughtStatus = 'visible';
-          thoughtView.label.textContent = this.thoughtLabel(thoughtBlocks);
-          thoughtView.body.textContent = thought;
-        }
-        if (message.type === 'done') {
-          if (typeof message.text === 'string') text = message.text;
-          if (message.thoughtBlocks) { thoughtBlocks = message.thoughtBlocks; thought = thoughtBlocks.map(item => item.text).join('\n\n'); }
-          thoughtStatus = message.thoughtStatus || thoughtStatus;
-          usage = message.usage; protocolState = message.protocolState;
-          complete();
-        }
-        if (message.type === 'error') complete(Object.assign(new Error(message.message), { retryable: message.retryable === true }));
-        if (message.type === 'cancelled') complete(new DOMException('已停止生成', 'AbortError'));
-      });
-      port.onDisconnect.addListener(() => {
-        if (!finished) complete(Object.assign(new Error(chrome.runtime.lastError?.message || '流式连接中断'), { retryable: true }));
-      });
       try {
+        port = chrome.runtime.connect({ name: 'AI_CHAT_STREAM' });
+        port.onMessage.addListener(message => {
+          if (finished) return;
+          if (message.type === 'delta') {
+            if (message.delta?.trim() && thoughtDurationMs === undefined) stopThinking();
+            text += message.delta;
+            assistant.body.textContent = text;
+            assistant.box.scrollIntoView({ block: 'end' });
+          }
+          if (message.type === 'thought') {
+            if (message.blocks) thoughtBlocks = message.blocks;
+            else {
+              const id = message.blockId || 'legacy';
+              let block = thoughtBlocks.find(item => item.id === id);
+              if (!block) { block = { id, kind: message.kind || 'content', text: '' }; thoughtBlocks.push(block); }
+              block.text += message.delta;
+            }
+            thought = thoughtBlocks.map(item => item.text).join('\n\n');
+            thoughtStatus = 'visible';
+            thoughtView.body.textContent = thought;
+          }
+          if (message.type === 'done') {
+            if (typeof message.text === 'string') text = message.text;
+            if (message.thoughtBlocks) { thoughtBlocks = message.thoughtBlocks; thought = thoughtBlocks.map(item => item.text).join('\n\n'); }
+            thoughtStatus = message.thoughtStatus || thoughtStatus;
+            usage = message.usage; protocolState = message.protocolState;
+            complete();
+          }
+          if (message.type === 'error') complete(Object.assign(new Error(message.message), { retryable: message.retryable === true }));
+          if (message.type === 'cancelled') complete(new DOMException('已停止生成', 'AbortError'));
+        });
+        port.onDisconnect.addListener(() => {
+          if (!finished) complete(Object.assign(new Error(chrome.runtime.lastError?.message || '流式连接中断'), { retryable: true }));
+        });
+        thoughtTimer = setInterval(updateElapsed, 1000);
         keepAliveTimer = setInterval(() => {
           try { port.postMessage({ type: 'ping' }); }
           catch (error) { complete(Object.assign(error, { retryable: true })); }
