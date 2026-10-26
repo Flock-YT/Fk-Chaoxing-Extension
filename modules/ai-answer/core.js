@@ -538,8 +538,9 @@ const AIAnswerCore = {
     const choices = targets.map((target, index) => {
       const label = sorting ? answer.answers[index] : answer.pairs.find(pair => pair.left === target.left)?.right;
       const prefix = sorting ? 'sortSelect' : 'connlineSelect';
-      const examControl = target.span?.classList.contains('select') && target.span.getAttribute('dataid') === qid;
-      if (!target.span?.classList.contains(`${prefix}${qid}`) && !examControl) throw new Error('无法识别下拉框答案控件');
+      const homeworkControl = target.span?.classList.contains(`${prefix}${qid}`);
+      const examControl = !homeworkControl && target.span?.classList.contains('select') && target.span.getAttribute('dataid') === qid;
+      if (!homeworkControl && !examControl) throw new Error('无法识别下拉框答案控件');
       const candidates = Array.from(target.box.querySelectorAll('ul.options > li'))
         .filter(item => DropdownQuestions.text(item.querySelector('a')?.textContent) === label &&
           (item.getAttribute('qid') === qid || (examControl && !item.hasAttribute('qid'))) &&
@@ -550,7 +551,7 @@ const AIAnswerCore = {
       if (!value) throw new Error('下拉选项缺少内部值');
       const name = target.span.getAttribute('data');
       if (!sorting && !/^\d+$/.test(name || '')) throw new Error('连线控件缺少有效内部编号');
-      return { ...target, item, label, value, name };
+      return { ...target, item, label, value, name, examControl };
     });
     if (!sorting && new Set(choices.map(choice => choice.name)).size !== expectedCount) {
       throw new Error('连线控件内部编号重复');
@@ -564,6 +565,8 @@ const AIAnswerCore = {
         DropdownQuestions.text(choice.span.textContent) !== choice.label)) {
       throw new Error('下拉框显示或选中值未更新，请检查页面');
     }
+    // Exam controls retain their selected values on the spans; the hidden field can stay stale after a click.
+    if (choices.every(choice => choice.examControl)) return true;
     if (sorting) {
       if (hidden.value !== choices.map(choice => choice.value).join('')) {
         throw new Error('排序答案字段未同步，请检查页面');
