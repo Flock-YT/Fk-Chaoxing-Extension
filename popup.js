@@ -27,8 +27,8 @@ class PopupController {
     this.remoteModels = [];
     this.activeModelIndex = -1;
     this.aiReasoningEffort = document.getElementById('ai-reasoning-effort');
-    this.aiSystemPrompt = document.getElementById('ai-system-prompt');
-    this.aiUserPrompt = document.getElementById('ai-user-prompt');
+    this.aiAnswerPrompt = document.getElementById('ai-answer-prompt');
+    this.aiChatPrompt = document.getElementById('ai-chat-prompt');
     this.aiProfiles = [];
     this.activeAiProfileId = null;
     this.editorId = null;
@@ -65,11 +65,11 @@ class PopupController {
   getDefaultAiProfile() {
     return { id: '', name: '', baseUrl: '', path: '/chat/completions', apiKey: '', model: '',
       apiType: 'chat_completions', apiVersion: '2026-10-21', workspaceId: '', reasoningEffort: '', temperature: 0.3,
-      systemPrompt: AIConfig.defaultSystemPrompt, userPrompt: AIConfig.defaultUserPrompt };
+      answerPrompt: AIConfig.defaultAnswerPrompt, chatPrompt: AIConfig.defaultChatPrompt };
   }
 
   normalizeAiProfile(profile = {}) {
-    const normalized = AIConfig.normalize({ ...this.getDefaultAiProfile(), ...profile,
+    const normalized = AIConfig.normalize({ ...profile,
       path: profile.path || AIConfig.defaultPath(profile.apiType),
       temperature: profile.temperature === undefined ? AIConfig.defaultTemperature(profile.apiType) : profile.temperature });
     normalized.id = profile.id || `model-${Date.now()}`;
@@ -196,13 +196,13 @@ class PopupController {
       apiVersion: this.aiApiVersion.value, workspaceId: this.aiWorkspaceId.value,
       claudeFallbackMaxTokens: this.aiClaudeFallbackMaxTokens.value,
       reasoningEffort: this.aiReasoningEffort.value, temperature: this.aiTemperature.value,
-      systemPrompt: this.aiSystemPrompt.value, userPrompt: this.aiUserPrompt.value };
+      answerPrompt: this.aiAnswerPrompt.value, chatPrompt: this.aiChatPrompt.value };
   }
 
   openEditor(profile = null, draft = null) {
     this.invalidateModelQuery();
     this.editorId = profile?.id || null;
-    const data = profile || draft || this.getDefaultAiProfile();
+    const data = AIConfig.normalize(profile || draft || this.getDefaultAiProfile());
     this.aiProfileName.value = data.name || '';
     this.aiBaseUrl.value = data.baseUrl || '';
     this.aiApiKey.value = data.apiKey || '';
@@ -214,8 +214,8 @@ class PopupController {
     this.aiApiPath.value = data.path || AIConfig.defaultPath(data.apiType);
     this.aiReasoningEffort.value = data.reasoningEffort || '';
     this.aiTemperature.value = data.temperature ?? '';
-    this.aiSystemPrompt.value = data.systemPrompt ?? AIConfig.defaultSystemPrompt;
-    this.aiUserPrompt.value = data.userPrompt ?? AIConfig.defaultUserPrompt;
+    this.aiAnswerPrompt.value = data.answerPrompt;
+    this.aiChatPrompt.value = data.chatPrompt;
     this.aiApiKey.type = 'password';
     document.getElementById('btn-key-visibility').title = '显示密钥';
     document.getElementById('btn-key-visibility').setAttribute('aria-label', '显示密钥');
@@ -610,13 +610,18 @@ class PopupController {
       on(id, 'change', () => this.invalidateModelQuery());
     });
     on('btn-prompt-reset', 'click', () => {
-      this.aiSystemPrompt.value = AIConfig.defaultSystemPrompt;
-      this.aiUserPrompt.value = AIConfig.defaultUserPrompt;
+      this.aiAnswerPrompt.value = AIConfig.defaultAnswerPrompt;
+      this.aiChatPrompt.value = AIConfig.defaultChatPrompt;
       document.getElementById('prompt-preview').hidden = true;
     });
     on('btn-prompt-preview', 'click', () => {
       const preview = document.getElementById('prompt-preview');
-      preview.textContent = `System: ${AIConfig.buildSystemPrompt(this.aiSystemPrompt.value)}\n\nUser: [所选题目与答题区现有内容]\n${this.aiUserPrompt.value}\n[本轮输入]`;
+      const config = { answerPrompt: this.aiAnswerPrompt.value, chatPrompt: this.aiChatPrompt.value };
+      preview.textContent = ['answer', 'chat', 'extract'].map(mode => {
+        const label = { answer: '作答：生成答案', chat: '讨论：发送', extract: '提取：填入答案' }[mode];
+        const context = mode === 'extract' ? '[讨论记录与当前作答目标]' : '[所选题目与答题区现有内容]';
+        return `${label}\nSystem: ${AIConfig.buildSystemPrompt(config, mode)}\n\nUser: ${context}${mode === 'chat' ? '\n[本轮输入]' : ''}`;
+      }).join('\n\n────────\n\n');
       preview.hidden = false;
     });
     on('btn-key-visibility', 'click', event => {

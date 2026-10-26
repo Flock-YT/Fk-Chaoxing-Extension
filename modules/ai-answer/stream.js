@@ -37,9 +37,7 @@ const AIStream = {
       publishedThoughtText = text;
     };
     const retryableError = message => Object.assign(new Error(message), { retryable: true });
-    const apiError = error => Object.assign(new Error(error.message || 'AI API 返回错误'), {
-      retryable: ['server_error', 'rate_limit_exceeded', 'overloaded_error', 'api_error', 8, 13, 14].includes(error.code || error.type)
-    });
+    const apiError = error => AIConfig.apiError(error);
     const update = (map, key, value, full, kind) => {
       if (typeof value !== 'string' || !value) return;
       const block = map.get(key) || { text: '', ...(kind ? { kind } : {}) };

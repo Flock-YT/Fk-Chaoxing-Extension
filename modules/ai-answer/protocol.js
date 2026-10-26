@@ -98,6 +98,7 @@ const AIProtocol = {
       body.store = false;
       body.reasoning = { summary: 'auto', ...(config.reasoningEffort ? { effort: config.reasoningEffort } : {}) };
     } else {
+      if (stream) body.stream_options = { include_usage: true };
       body.messages = messages.map(message => ({ ...(this.savedState(message, config) || {}), role: message.role, content: message.content }));
       if (config.reasoningEffort) body.reasoning_effort = config.reasoningEffort;
     }

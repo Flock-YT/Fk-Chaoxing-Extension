@@ -27,7 +27,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       })
       .catch(error => {
         log.error(`AI API request failed: ${error.message}`);
-        sendResponse({ success: false, error: error.message, retryable: error.retryable === true });
+        sendResponse({ success: false, error: error.message, retryable: error.retryable === true, contextLimit: error.contextLimit === true });
       });
     return true; // 保持消息通道开放
   } else if (request.action === 'updateBadge') {
@@ -51,7 +51,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 chrome.runtime.onConnect.addListener(port => {
-  if (port.name === 'AI_MODEL_QUERY') {
+  if (['AI_MODEL_QUERY', 'AI_MODEL_INFO'].includes(port.name)) {
     let controller, finished = false;
     const complete = message => {
       if (finished) return;
@@ -65,8 +65,9 @@ chrome.runtime.onConnect.addListener(port => {
       }
       if (message?.type !== 'start' || controller || finished) return;
       controller = new AbortController();
-      queryModelList(message.config, controller)
-        .then(models => complete({ type: 'done', models }))
+      const query = port.name === 'AI_MODEL_QUERY' ? queryModelList(message.config, controller)
+        : queryModelInfo(message.config, controller);
+      query.then(result => complete({ type: 'done', ...(port.name === 'AI_MODEL_QUERY' ? { models: result } : result) }))
         .catch(error => complete({ type: 'error', message: error.message }));
     });
     port.onDisconnect.addListener(() => { finished = true; controller?.abort(); });
@@ -100,7 +101,7 @@ chrome.runtime.onConnect.addListener(port => {
     } : undefined, port.name === 'AI_CHAT_STREAM' ? message.profileId : undefined, message.timeoutSeconds, message.config)
       .then(result => complete({ type: 'done', ...result }))
       .catch(error => {
-        if (!finished) complete({ type: 'error', message: error.message, retryable: error.retryable === true });
+        if (!finished) complete({ type: 'error', message: error.message, retryable: error.retryable === true, contextLimit: error.contextLimit === true });
       });
   });
 
@@ -149,9 +150,7 @@ async function streamDialogueReply(messages, reasoningEffort, controller, onDelt
       signal: controller.signal
     });
     if (!response.ok) {
-      const error = new Error(`AI API 请求失败（${response.status}）：${(await response.text()).slice(0, 500)}`);
-      error.retryable = response.status === 408 || response.status === 429 || response.status >= 500;
-      throw error;
+      throw await apiResponseError(response);
     }
     const result = response.headers?.get('content-type')?.includes('application/json')
       ? AIStream.parseResponse(await readJsonResponse(response), config.apiType, onDelta, onThought)
@@ -214,9 +213,7 @@ async function callAIAPI(data) {
     });
 
     if (!response.ok) {
-      const error = new Error(`API Request Failed: ${response.status} - ${await response.text()}`);
-      error.retryable = response.status === 408 || response.status === 429 || response.status >= 500;
-      throw error;
+      throw await apiResponseError(response);
     }
 
     return responseDetails(config, AIStream.parseResponse(await readJsonResponse(response), config.apiType));
@@ -227,6 +224,15 @@ async function callAIAPI(data) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function apiResponseError(response) {
+  const text = await response.text();
+  let payload;
+  try { payload = JSON.parse(text); } catch (_) { /* Plain-text relay errors are also supported. */ }
+  const error = AIConfig.apiError(payload?.error || text, response.status);
+  error.message = `AI API 请求失败（${response.status}）：${error.message.slice(0, 500)}`;
+  return error;
 }
 
 async function readJsonResponse(response) {
@@ -260,18 +266,23 @@ function buildRequestBody(config, messages, stream = false, maxOutputTokens) {
   return AIProtocol.body(config, messages, stream, maxOutputTokens);
 }
 
-async function queryModelList(requestConfig, controller) {
+async function queryModelList(requestConfig, controller, infoOnly = false) {
   const config = normalizeApiConfig(requestConfig);
   if (!config.baseUrl || !config.apiKey) throw new Error('请填写 API 地址和密钥');
   const { timeoutSeconds } = await AIConfig.loadBatchSettings();
   controller.signal.throwIfAborted();
   let timedOut = false;
   const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutSeconds * 1000);
-  try { return await AIModelQuery.list(config, controller.signal); }
+  try { return await (infoOnly ? AIModelQuery.inputInfo(config, controller.signal) : AIModelQuery.list(config, controller.signal)); }
   catch (error) {
     if (timedOut) throw new Error(`模型查询超时（${timeoutSeconds} 秒）`);
     throw error;
   } finally { clearTimeout(timeout); }
+}
+
+async function queryModelInfo(requestConfig, controller) {
+  if (!requestConfig?.model) return { maxInputTokens: null };
+  return queryModelList(requestConfig, controller, true);
 }
 
 function extractResponseText(result, apiType) {

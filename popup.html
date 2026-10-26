@@ -116,7 +116,7 @@
           <div class="setting-field">
             <label for="ai-batch-size">每次请求题目数</label>
             <input id="ai-batch-size" class="form-control" type="number" min="1" max="100" step="1" inputmode="numeric">
-            <p>对话与生成答案均按此上限分批，每批独立处理题目。</p>
+            <p>生成与提取答案按此上限分批；讨论每轮使用一个完整请求，保持上下文连贯。</p>
           </div>
           <div class="setting-field">
             <label for="ai-concurrency">同时并发数</label>
@@ -234,12 +234,14 @@
         </div>
         <p class="settings-caption">设置思考等级时不发送温度参数。所选等级按接口协议透传，由服务商决定支持范围与映射。Claude 原生接口在生成前自动查询输出上限，不发送温度；其他协议不发送输出上限参数。保存不会调用模型；测试连接可能产生费用。</p>
         <div class="form-group">
-          <label for="ai-system-prompt">系统提示词</label>
-          <textarea id="ai-system-prompt" class="form-control" rows="4"></textarea>
+          <label for="ai-answer-prompt">作答提示词</label>
+          <textarea id="ai-answer-prompt" class="form-control" rows="8"></textarea>
+          <p class="settings-caption">留空生成时实际使用的完整系统提示词，可编辑 JSON 格式与题型规则。返回格式不符合本地校验要求时不会填写。</p>
         </div>
         <div class="form-group">
-          <label for="ai-user-prompt">用户提示词</label>
-          <textarea id="ai-user-prompt" class="form-control" rows="4"></textarea>
+          <label for="ai-chat-prompt">对话提示词</label>
+          <textarea id="ai-chat-prompt" class="form-control" rows="4"></textarea>
+          <p class="settings-caption">发送讨论消息时使用的独立系统提示词。本轮输入作为用户消息发送；“填入答案”使用内部提取规则，只整理已确定的答案。</p>
         </div>
         <div class="inline-row">
           <button id="btn-prompt-reset" class="btn btn-outline" type="button">恢复默认提示词</button>

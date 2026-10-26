@@ -12,12 +12,19 @@ const AIModelQuery = {
 
   connection(config) {
     const key = JSON.stringify([this.modelsUrl(config).toString(), config.apiType, config.apiKey, config.workspaceId, config.apiVersion]);
-    if (!this.connections.has(key)) this.connections.set(key, { cache: new Map(), pending: new Map(), revision: 0 });
+    if (!this.connections.has(key)) this.connections.set(key, { cache: new Map(), specs: new Map(), pending: new Map(), revision: 0 });
     return this.connections.get(key);
   },
 
   outputLimit(model) {
     return [model?.max_tokens, model?.max_output_tokens].find(value => Number.isSafeInteger(value) && value > 0);
+  },
+
+  specifications(model, apiType) {
+    const input = apiType === 'gemini_generate_content' ? model?.inputTokenLimit : model?.max_input_tokens;
+    const output = apiType === 'gemini_generate_content' ? model?.outputTokenLimit : this.outputLimit(model);
+    return { maxInputTokens: Number.isSafeInteger(input) && input > 0 ? input : null,
+      maxOutputTokens: Number.isSafeInteger(output) && output > 0 ? output : null };
   },
 
   shared(connection, key, signal, work) {
@@ -78,6 +85,7 @@ const AIModelQuery = {
     if (!connection.pending.has('list')) {
       connection.revision++;
       connection.cache.clear();
+      connection.specs.clear();
     }
     const revision = connection.revision;
     return this.shared(connection, 'list', signal, async querySignal => {
@@ -94,7 +102,9 @@ const AIModelQuery = {
           const id = gemini ? rawId.replace(/^models\//, '') : rawId;
           const limit = config.apiType === 'anthropic_messages' ? this.outputLimit(item)
             : gemini && Number.isSafeInteger(item.outputTokenLimit) && item.outputTokenLimit > 0 ? item.outputTokenLimit : undefined;
+          const specs = this.specifications(item, config.apiType);
           const model = { id, label: item.display_name || item.displayName || item.name || id,
+            ...(specs.maxInputTokens ? { maxInputTokens: specs.maxInputTokens } : {}),
             ...(limit ? { maxOutputTokens: limit } : {}) };
           const previous = models.get(id);
           models.set(id, previous ? { ...model, ...previous, ...(limit ? { maxOutputTokens: limit } : {}) } : model);
@@ -109,6 +119,10 @@ const AIModelQuery = {
         url.searchParams.set(gemini ? 'pageToken' : 'after_id', cursor);
       }
       querySignal.throwIfAborted();
+      if (connection.revision === revision) for (const model of models.values()) {
+        connection.specs.set(model.id, { value: { maxInputTokens: model.maxInputTokens || null,
+          maxOutputTokens: model.maxOutputTokens || null }, expiresAt: Date.now() + this.cacheTtl });
+      }
       if (config.apiType === 'anthropic_messages' && connection.revision === revision) {
         for (const model of models.values()) if (model.maxOutputTokens) {
           connection.cache.set(model.id, { value: model.maxOutputTokens, expiresAt: Date.now() + this.cacheTtl });
@@ -124,16 +138,50 @@ const AIModelQuery = {
     const cached = connection.cache.get(config.model);
     if (cached?.expiresAt > Date.now()) return cached.value;
     connection.cache.delete(config.model);
+    const specs = await this.details(config, signal);
+    if (!specs.maxOutputTokens) throw new Error('模型详情未返回有效的输出上限（max_tokens / max_output_tokens）');
+    return specs.maxOutputTokens;
+  },
+
+  async details(config, signal) {
+    signal.throwIfAborted();
+    const connection = this.connection(config);
+    const cached = connection.specs.get(config.model);
+    if (cached?.expiresAt > Date.now() && !cached.failed &&
+        !(config.apiType === 'anthropic_messages' && !cached.value.maxOutputTokens)) return cached.value;
+    connection.specs.delete(config.model);
     const revision = connection.revision;
     return this.shared(connection, `detail:${revision}:${config.model}`, signal, async querySignal => {
       const url = this.modelsUrl(config);
-      url.pathname += `/${encodeURIComponent(config.model)}`;
+      const model = config.apiType === 'gemini_generate_content' ? config.model.replace(/^models\//, '') : config.model;
+      url.pathname += `/${encodeURIComponent(model)}`;
       const result = await this.fetchJson(config, url, querySignal);
-      const limit = this.outputLimit(result);
-      if (!limit) throw new Error('模型详情未返回有效的输出上限（max_tokens / max_output_tokens）');
-      if (connection.revision === revision) connection.cache.set(config.model, { value: limit, expiresAt: Date.now() + this.cacheTtl });
-      return limit;
+      const value = this.specifications(result, config.apiType);
+      if (connection.revision === revision) {
+        const expiresAt = Date.now() + this.cacheTtl;
+        connection.specs.set(config.model, { value, expiresAt });
+        if (value.maxOutputTokens && config.apiType === 'anthropic_messages') {
+          connection.cache.set(config.model, { value: value.maxOutputTokens, expiresAt });
+        }
+      }
+      return value;
     });
+  },
+
+  async inputInfo(config, signal) {
+    const connection = this.connection(config), revision = connection.revision;
+    const cached = connection.specs.get(config.model);
+    if (cached?.expiresAt > Date.now()) {
+      signal.throwIfAborted();
+      return { maxInputTokens: cached.value.maxInputTokens };
+    }
+    try { return { maxInputTokens: (await this.details(config, signal)).maxInputTokens }; }
+    catch (error) {
+      signal.throwIfAborted();
+      if (connection.revision === revision) connection.specs.set(config.model, { failed: true,
+        value: { maxInputTokens: null, maxOutputTokens: null }, expiresAt: Date.now() + this.cacheTtl });
+      return { maxInputTokens: null };
+    }
   },
 
   async prepare(config, signal) {
