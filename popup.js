@@ -455,7 +455,7 @@ class PopupController {
 
   updateAiAnswerButton() {
     const profile = this.getActiveAiProfile();
-    this.btnAiText.textContent = profile ? `使用 ${profile.name} 答题` : '请先配置 AI 模型';
+    this.btnAiText.textContent = profile ? '打开作答页面' : '请先配置 AI 模型';
     this.btnAiAnswer.disabled = !this.isEnabled;
   }
 

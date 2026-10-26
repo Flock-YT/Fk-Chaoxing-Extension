@@ -113,7 +113,7 @@ const AIChat = {
       <p id="context-note"></p>
       <details id="preview-panel"><summary>查看发送内容</summary><pre id="preview-text"></pre></details></details>
       <div id="references"></div><textarea id="input" rows="3" placeholder="留空可直接生成并填写答案；输入内容可先讨论，再点击“填入答案”…"></textarea>
-      <div class="actions"><button id="preview">预览</button><button id="regenerate" title="重新执行上一轮操作">重新生成</button><button id="stop" hidden>停止</button><button id="fill" disabled>填入答案</button><button id="send">生成答案</button></div><div id="status" role="status" hidden></div></main></div>`;
+      <div class="actions"><button id="clear-context" title="清除本页对话记录，保留题目引用" disabled>清空上下文</button><button id="preview">预览</button><button id="regenerate" title="重新执行上一轮操作">重新生成</button><button id="stop" hidden>停止</button><button id="fill" disabled>填入答案</button><button id="send">生成答案</button></div><div id="status" role="status" hidden></div></main></div>`;
     this.root.append(panel);
     this.el('minimize').onclick = () => {
       const minimized = host.classList.toggle('minimized');
@@ -159,6 +159,7 @@ const AIChat = {
       }
     };
     this.el('regenerate').onclick = () => this.regenerate();
+    this.el('clear-context').onclick = () => this.clearContext();
     this.el('preview').onclick = async () => {
       const config = await AIApi.loadConfig();
       if (this.quickEffort !== null) config.reasoningEffort = this.quickEffort;
@@ -277,6 +278,16 @@ const AIChat = {
     return JSON.stringify(current?.existingAnswer ?? null);
   },
   async persist() { await chrome.storage.local.set({ [this.pageKey()]: this.history.slice(-60) }); },
+  async clearContext() {
+    if (this.pending) return;
+    this.history = [];
+    this.el('preview-text').textContent = '';
+    this.el('preview-panel').open = false;
+    this.renderHistory();
+    this.task('上下文已清空，已保留题目引用。', 'success');
+    try { await this.persist(); }
+    catch (error) { this.task(`清空记录保存失败：${error.message}`, 'error'); }
+  },
   renderHistory() {
     const feed = this.el('feed'); feed.replaceChildren();
     this.history.forEach(item => {
@@ -714,6 +725,7 @@ const AIChat = {
     this.el('send').disabled = Boolean(this.pending) || (!input && !hasTarget);
     this.el('fill').disabled = Boolean(this.pending) || !hasTarget || !this.hasChatReply();
     this.el('regenerate').disabled = Boolean(this.pending) || !this.history.some(item => item.role === 'user' && item.request);
+    this.el('clear-context').disabled = Boolean(this.pending) || !this.history.length;
   },
   setBusy(value) {
     this.updateActions();
