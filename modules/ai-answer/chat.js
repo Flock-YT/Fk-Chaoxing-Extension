@@ -282,7 +282,8 @@ const AIChat = {
     this.history.forEach(item => {
       const bubble = this.addBubble(item.role, item.text, item.modelLabel ||
         (item.role === 'assistant' ? 'AI · 旧记录未保存模型' : ''), item.request);
-      if (item.role === 'assistant' && item.thought) this.addThought(bubble, item.thought, false);
+      if (item.role === 'assistant' && (item.thought || item.thoughtStatus)) this.addThought(bubble,
+        item.thought || this.thoughtNote(item.thoughtStatus), false, item);
     });
     if (!this.history.length) {
       const empty = document.createElement('p'); empty.className = 'empty-state';
@@ -317,9 +318,17 @@ const AIChat = {
     return wrapper;
   },
   typeLabel(type) { return ({ single_choice: '单选题', multiple_choice: '多选题', fill_blank: '填空题', short_answer: '简答题', programming: '程序题', sorting: '排序题', matching: '连线题' })[type] || type; },
-  addThought(bubble, text = '', open = true) {
+  thoughtLabel(blocks = [], legacy = false) {
+    return blocks.length && blocks.every(block => block.kind === 'summary') ? '思考摘要' : legacy ? '思考过程' : '思考内容';
+  },
+  thoughtNote(status) {
+    return { encrypted: '接口仅返回了加密思考数据，无法展示文本。', hidden: '接口隐藏了本次思考内容。',
+      failed: '请求失败，未能获取完整思考内容。', cancelled: '已停止，思考内容未接收完成。'
+    }[status] || '接口未返回可展示的思考内容。';
+  },
+  addThought(bubble, text = '', open = true, metadata = {}) {
     const entry = document.createElement('details'); entry.className = 'thought-entry'; entry.open = open;
-    const label = document.createElement('summary'); label.textContent = open ? '正在思考…' : '思考过程';
+    const label = document.createElement('summary'); label.textContent = open ? '正在思考…' : this.thoughtLabel(metadata.thoughtBlocks, !metadata.thoughtStatus);
     const body = document.createElement('pre'); body.textContent = text;
     entry.append(label, body); bubble.box.insertBefore(entry, bubble.body);
     return { body, entry, label };
@@ -422,6 +431,7 @@ const AIChat = {
               return { ...reply, entries };
             }, settings.maxRetries, job, `${label}${mode === 'extract' ? '答案提取' : '生成'}`);
             this.history.push({ role: 'assistant', text: done.text, thought: done.thought, mode,
+              thoughtBlocks: done.thoughtBlocks, thoughtStatus: done.thoughtStatus, usage: done.usage, protocolState: done.protocolState,
               modelLabel, reasoningEffort: config.reasoningEffort, questionKeys: batch.context.map(q => this.questionKey(q)) });
             if (done.entries) {
               if (mode === 'extract') {
@@ -442,7 +452,6 @@ const AIChat = {
             if (job.controller.signal.aborted) break;
             job.failures.push(label);
             thoughtView.entry.open = false;
-            thoughtView.label.textContent = '思考过程';
             assistant.body.textContent += `\n\n${label}失败：${error.message}`;
           }
         }
@@ -472,17 +481,20 @@ const AIChat = {
     return new Promise((resolve, reject) => {
       const port = chrome.runtime.connect({ name: 'AI_CHAT_STREAM' });
       let finished = false, keepAliveTimer;
-      let text = '', thought = '';
+      let text = '', thought = '', thoughtStatus = 'not_returned', usage, protocolState;
+      let thoughtBlocks = [];
       const complete = error => {
         if (finished) return;
         finished = true;
         clearInterval(keepAliveTimer);
         signal.removeEventListener('abort', cancel);
         thoughtView.entry.open = false;
-        thoughtView.label.textContent = '思考过程';
-        if (!thought) thoughtView.body.textContent = '模型未返回可展示的思考过程。';
+        thoughtView.label.textContent = this.thoughtLabel(thoughtBlocks);
+        if (error) thoughtStatus = error.name === 'AbortError' ? 'cancelled' : 'failed';
+        thoughtView.body.textContent = thought ? thought + (error ? `\n\n${this.thoughtNote(thoughtStatus)}` : '') : this.thoughtNote(thoughtStatus);
+        assistant.body.textContent = text;
         port.disconnect();
-        if (error) reject(error); else resolve({ text, thought });
+        if (error) reject(error); else resolve({ text, thought, thoughtBlocks, thoughtStatus, usage, protocolState });
       };
       const cancel = () => {
         try { port.postMessage({ type: 'cancel' }); }
@@ -494,16 +506,31 @@ const AIChat = {
         if (finished) return;
         if (message.type === 'delta') {
           thoughtView.entry.open = false;
-          thoughtView.label.textContent = '思考过程';
+          thoughtView.label.textContent = this.thoughtLabel(thoughtBlocks);
           text += message.delta;
           assistant.body.textContent = text;
           assistant.box.scrollIntoView({ block: 'end' });
         }
         if (message.type === 'thought') {
-          thought += message.delta;
+          if (message.blocks) thoughtBlocks = message.blocks;
+          else {
+            const id = message.blockId || 'legacy';
+            let block = thoughtBlocks.find(item => item.id === id);
+            if (!block) { block = { id, kind: message.kind || 'content', text: '' }; thoughtBlocks.push(block); }
+            block.text += message.delta;
+          }
+          thought = thoughtBlocks.map(item => item.text).join('\n\n');
+          thoughtStatus = 'visible';
+          thoughtView.label.textContent = this.thoughtLabel(thoughtBlocks);
           thoughtView.body.textContent = thought;
         }
-        if (message.type === 'done') complete();
+        if (message.type === 'done') {
+          if (typeof message.text === 'string') text = message.text;
+          if (message.thoughtBlocks) { thoughtBlocks = message.thoughtBlocks; thought = thoughtBlocks.map(item => item.text).join('\n\n'); }
+          thoughtStatus = message.thoughtStatus || thoughtStatus;
+          usage = message.usage; protocolState = message.protocolState;
+          complete();
+        }
         if (message.type === 'error') complete(Object.assign(new Error(message.message), { retryable: message.retryable === true }));
         if (message.type === 'cancelled') complete(new DOMException('已停止生成', 'AbortError'));
       });
@@ -516,7 +543,7 @@ const AIChat = {
           catch (error) { complete(Object.assign(error, { retryable: true })); }
         }, 20000);
         port.postMessage({ type: 'start', messages: this.messages(config, request, history),
-          reasoningEffort: config.reasoningEffort, profileId: config.id, timeoutSeconds: job.timeoutSeconds });
+          reasoningEffort: config.reasoningEffort, profileId: config.id, config, timeoutSeconds: job.timeoutSeconds });
       } catch (error) { complete(error); }
     });
   },
@@ -530,7 +557,7 @@ const AIChat = {
   hasChatReply() {
     return this.conversationHistory().some(item => item.role === 'assistant' && item.text?.trim());
   },
-  historyMessages(request, history, extracting = false) {
+  historyMessages(request, history, extracting = false, config) {
     const keys = new Set(request.context.map(q => this.questionKey(q)));
     const recent = [];
     let includeReply = false, includeLegacyReply = false;
@@ -547,7 +574,9 @@ const AIChat = {
         ? (extracting ? item.questionKeys.some(key => keys.has(key)) || !item.questionKeys.length : item.questionKeys.every(key => keys.has(key)))
         : includeReply && includeLegacyReply) {
         const scope = extracting && item.questionKeys?.length ? `本条回复原引用的页面题号：${item.questionKeys.map(key => key.split(':')[0]).join('、')}\n` : '';
-        recent.push({ role: item.role, content: scope + item.text });
+        const state = config && item.protocolState?.identity === AIConfig.protocolIdentity(config) ? item.protocolState : undefined;
+        if (scope && state) recent.push({ role: 'user', content: scope });
+        recent.push({ role: item.role, content: state ? item.text : scope + item.text, ...(state ? { protocolState: state } : {}) });
       }
     }
     return recent;
@@ -556,7 +585,7 @@ const AIChat = {
     const structured = request.mode !== 'chat';
     const relatedOnly = request.mode === 'extract';
     return [{ role: 'system', content: AIConfig.buildSystemPrompt(config.systemPrompt, { structured, relatedOnly }) },
-      ...this.historyMessages(request, history, relatedOnly),
+      ...this.historyMessages(request, history, relatedOnly, config),
       { role: 'user', content: AIApi.withImages(this.requestText(request, config.userPrompt), request.context) }];
   },
   requestText(request, userPrompt = '') {

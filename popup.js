@@ -18,6 +18,14 @@ class PopupController {
     this.aiApiPath = document.getElementById('ai-api-path');
     this.aiTemperature = document.getElementById('ai-temperature');
     this.aiApiType = document.getElementById('ai-api-type');
+    this.aiApiVersion = document.getElementById('ai-api-version');
+    this.aiWorkspaceId = document.getElementById('ai-workspace-id');
+    this.aiClaudeFallbackMaxTokens = document.getElementById('ai-claude-fallback-max-tokens');
+    this.aiModelChoice = document.getElementById('ai-model-choice');
+    this.aiModelOptions = document.getElementById('ai-model-options');
+    this.aiModelOptionsToggle = document.getElementById('btn-ai-model-options');
+    this.remoteModels = [];
+    this.activeModelIndex = -1;
     this.aiReasoningEffort = document.getElementById('ai-reasoning-effort');
     this.aiSystemPrompt = document.getElementById('ai-system-prompt');
     this.aiUserPrompt = document.getElementById('ai-user-prompt');
@@ -26,6 +34,7 @@ class PopupController {
     this.editorId = null;
     this.editorSnapshot = '';
     this.currentView = 'home';
+    this.modelQuery = null;
     this.currentTab = null;
     this.isEnabled = true;
     this.init();
@@ -47,6 +56,7 @@ class PopupController {
     if (!force && this.currentView === 'model-editor' && view !== 'model-editor' &&
         this.editorSnapshot !== JSON.stringify(this.formState()) &&
         !window.confirm('模型配置尚未保存，确定放弃修改吗？')) return false;
+    if (this.currentView === 'model-editor' && view !== 'model-editor') this.invalidateModelQuery();
     this.views.forEach(name => { document.getElementById(`view-${name}`).hidden = name !== view; });
     this.currentView = view;
     return true;
@@ -54,7 +64,7 @@ class PopupController {
 
   getDefaultAiProfile() {
     return { id: '', name: '', baseUrl: '', path: '/chat/completions', apiKey: '', model: '',
-      apiType: 'chat_completions', reasoningEffort: '', temperature: 0.3,
+      apiType: 'chat_completions', apiVersion: '2026-10-21', workspaceId: '', reasoningEffort: '', temperature: 0.3,
       systemPrompt: AIConfig.defaultSystemPrompt, userPrompt: AIConfig.defaultUserPrompt };
   }
 
@@ -183,11 +193,14 @@ class PopupController {
   formState() {
     return { name: this.aiProfileName.value, baseUrl: this.aiBaseUrl.value, apiKey: this.aiApiKey.value,
       model: this.aiModelId.value, path: this.aiApiPath.value, apiType: this.aiApiType.value,
+      apiVersion: this.aiApiVersion.value, workspaceId: this.aiWorkspaceId.value,
+      claudeFallbackMaxTokens: this.aiClaudeFallbackMaxTokens.value,
       reasoningEffort: this.aiReasoningEffort.value, temperature: this.aiTemperature.value,
       systemPrompt: this.aiSystemPrompt.value, userPrompt: this.aiUserPrompt.value };
   }
 
   openEditor(profile = null, draft = null) {
+    this.invalidateModelQuery();
     this.editorId = profile?.id || null;
     const data = profile || draft || this.getDefaultAiProfile();
     this.aiProfileName.value = data.name || '';
@@ -195,6 +208,9 @@ class PopupController {
     this.aiApiKey.value = data.apiKey || '';
     this.aiModelId.value = data.model || '';
     this.aiApiType.value = data.apiType || 'chat_completions';
+    this.aiApiVersion.value = data.apiVersion || '2026-10-21';
+    this.aiWorkspaceId.value = data.workspaceId || '';
+    this.aiClaudeFallbackMaxTokens.value = data.claudeFallbackMaxTokens ?? '';
     this.aiApiPath.value = data.path || AIConfig.defaultPath(data.apiType);
     this.aiReasoningEffort.value = data.reasoningEffort || '';
     this.aiTemperature.value = data.temperature ?? '';
@@ -217,14 +233,145 @@ class PopupController {
     return AIConfig.normalize({ ...this.formState(), id: this.editorId || `model-${Date.now()}` });
   }
 
-  validateAiProfile(profile) {
-    if (!profile.name) throw new Error('请填写显示名称');
+  validateAiConnection(profile) {
     if (!profile.baseUrl) throw new Error('请填写 API 地址');
     let url;
     try { url = new URL(profile.baseUrl); } catch (err) { throw new Error('API 地址格式不正确'); }
     if (!['https:', 'http:'].includes(url.protocol)) throw new Error('API 地址需使用 HTTP 或 HTTPS');
     if (!profile.apiKey) throw new Error('请填写 API 密钥');
+  }
+
+  validateAiProfile(profile) {
+    if (!profile.name) throw new Error('请填写显示名称');
+    this.validateAiConnection(profile);
     if (!profile.model) throw new Error('请填写模型 ID');
+  }
+
+  renderModelOptions(models) {
+    this.setModelOptionsOpen(false);
+    this.remoteModels = models;
+    this.aiModelOptions.replaceChildren();
+    models.forEach((model, index) => {
+      const option = document.createElement('li');
+      option.id = `ai-model-option-${index}`;
+      option.setAttribute('role', 'option');
+      option.setAttribute('aria-selected', 'false');
+      option.textContent = model.id;
+      option.addEventListener('click', () => this.selectModelOption(index));
+      this.aiModelOptions.appendChild(option);
+    });
+    if (!models.length) {
+      const empty = document.createElement('li');
+      empty.className = 'model-options-empty';
+      empty.setAttribute('role', 'presentation');
+      empty.textContent = '暂无可选模型，可拉取模型或直接输入 ID。';
+      this.aiModelOptions.appendChild(empty);
+    }
+  }
+
+  setModelOptionsOpen(open) {
+    this.aiModelOptions.hidden = !open;
+    this.aiModelId.setAttribute('aria-expanded', String(open));
+    this.aiModelOptionsToggle.setAttribute('aria-expanded', String(open));
+    this.aiModelOptionsToggle.setAttribute('aria-label', open ? '收起模型列表' : '展开模型列表');
+    this.setActiveModelOption(open ? this.remoteModels.findIndex(model => model.id === this.aiModelId.value) : -1);
+  }
+
+  setActiveModelOption(index) {
+    this.activeModelIndex = index;
+    const options = this.aiModelOptions.querySelectorAll('[role="option"]');
+    options.forEach((option, i) => option.setAttribute('aria-selected', String(i === index)));
+    if (index < 0) this.aiModelId.removeAttribute('aria-activedescendant');
+    else {
+      this.aiModelId.setAttribute('aria-activedescendant', options[index].id);
+      options[index].scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  selectModelOption(index) {
+    this.aiModelId.value = this.remoteModels[index].id;
+    this.setModelOptionsOpen(false);
+    this.aiModelId.focus();
+  }
+
+  handleModelChoiceKey(event) {
+    if (event.isComposing) return;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const wasOpen = !this.aiModelOptions.hidden;
+      if (!wasOpen) this.setModelOptionsOpen(true);
+      const count = this.remoteModels.length;
+      if (!count) return;
+      const direction = event.key === 'ArrowDown' ? 1 : -1;
+      const index = this.activeModelIndex < 0 ? (direction > 0 ? 0 : count - 1)
+        : wasOpen ? (this.activeModelIndex + direction + count) % count : this.activeModelIndex;
+      this.setActiveModelOption(index);
+    } else if (event.key === 'Enter' && !this.aiModelOptions.hidden && this.activeModelIndex >= 0) {
+      event.preventDefault();
+      this.selectModelOption(this.activeModelIndex);
+    } else if (event.key === 'Escape' && !this.aiModelOptions.hidden) {
+      event.preventDefault();
+      this.setModelOptionsOpen(false);
+    } else if (event.key === 'Tab') this.setModelOptionsOpen(false);
+  }
+
+  invalidateModelQuery() {
+    const query = this.modelQuery;
+    this.modelQuery = null;
+    if (query?.keepAliveTimer) clearInterval(query.keepAliveTimer);
+    if (query?.port) {
+      try { query.port.postMessage({ type: 'cancel' }); } catch (_) { /* Already disconnected. */ }
+      query.port.disconnect();
+    }
+    document.getElementById('btn-ai-models-fetch').disabled = false;
+    document.getElementById('ai-models-status').hidden = true;
+    this.renderModelOptions([]);
+  }
+
+  async fetchAiModels() {
+    this.invalidateModelQuery();
+    const query = {};
+    this.modelQuery = query;
+    const button = document.getElementById('btn-ai-models-fetch');
+    const status = document.getElementById('ai-models-status');
+    const finish = (message, models) => {
+      if (this.modelQuery !== query || query.finished) return;
+      query.finished = true;
+      if (query.keepAliveTimer) clearInterval(query.keepAliveTimer);
+      const port = query.port;
+      query.port = null;
+      port?.disconnect();
+      button.disabled = false;
+      status.hidden = false;
+      status.textContent = message;
+      this.renderModelOptions(models || []);
+    };
+    button.disabled = true;
+    status.hidden = false;
+    status.textContent = '正在拉取模型…';
+    try {
+      // Discovery only requires connection fields, independent of generation settings.
+      const config = AIConfig.normalize({ baseUrl: this.aiBaseUrl.value, apiKey: this.aiApiKey.value,
+        path: this.aiApiPath.value, apiType: this.aiApiType.value,
+        apiVersion: this.aiApiVersion.value, workspaceId: this.aiWorkspaceId.value });
+      this.validateAiConnection(config);
+      await this.requestAiHostPermission(config.baseUrl);
+      if (this.modelQuery !== query) return;
+      const port = chrome.runtime.connect({ name: 'AI_MODEL_QUERY' });
+      query.port = port;
+      query.keepAliveTimer = setInterval(() => {
+        try { port.postMessage({ type: 'ping' }); }
+        catch (_) { finish('模型查询连接中断，可重试或手动填写 ID。'); }
+      }, 20000);
+      port.onMessage.addListener(message => {
+        if (message.type === 'done') finish(message.models.length ? `已拉取 ${message.models.length} 个模型，请选择或手动填写 ID。` : '模型列表为空，可继续手动填写 ID。', message.models);
+        if (message.type === 'error') finish(`拉取失败：${message.message}。可重试或手动填写 ID。`);
+      });
+      port.onDisconnect.addListener(() => {
+        if (query.port === port) { query.port = null; finish('模型查询连接中断，可重试或手动填写 ID。'); }
+      });
+      port.postMessage({ type: 'start', config });
+    } catch (error) { finish(`拉取失败：${error.message}`); }
   }
 
   showEditorMessage(message, type = 'error') {
@@ -298,7 +445,8 @@ class PopupController {
   }
 
   updateTemperatureState() {
-    this.aiTemperature.disabled = this.aiReasoningEffort.value !== '';
+    this.aiTemperature.disabled = this.aiReasoningEffort.value !== '' || this.aiApiType.value === 'anthropic_messages';
+    document.getElementById('ai-native-connection').hidden = this.aiApiType.value !== 'anthropic_messages';
   }
 
   resetQuickReasoning() {
@@ -443,6 +591,24 @@ class PopupController {
     on('btn-ai-config-save', 'click', () => this.saveAiProfile());
     on('btn-ai-config-delete', 'click', () => this.deleteAiProfile());
     on('btn-ai-config-test', 'click', () => this.testAiConnection());
+    on('btn-ai-models-fetch', 'click', () => this.fetchAiModels());
+    on('btn-ai-model-options', 'click', () => {
+      this.setModelOptionsOpen(this.aiModelOptions.hidden);
+      this.aiModelId.focus();
+    });
+    on('ai-model-id', 'input', () => this.setModelOptionsOpen(false));
+    on('ai-model-choice', 'keydown', event => this.handleModelChoiceKey(event));
+    on('ai-model-options', 'mousedown', event => event.preventDefault());
+    on('ai-model-choice', 'focusout', event => {
+      if (!this.aiModelChoice.contains(event.relatedTarget)) this.setModelOptionsOpen(false);
+    });
+    document.addEventListener('click', event => {
+      if (!this.aiModelChoice.contains(event.target)) this.setModelOptionsOpen(false);
+    });
+    ['ai-base-url', 'ai-api-key', 'ai-api-path', 'ai-api-type', 'ai-api-version', 'ai-workspace-id'].forEach(id => {
+      on(id, 'input', () => this.invalidateModelQuery());
+      on(id, 'change', () => this.invalidateModelQuery());
+    });
     on('btn-prompt-reset', 'click', () => {
       this.aiSystemPrompt.value = AIConfig.defaultSystemPrompt;
       this.aiUserPrompt.value = AIConfig.defaultUserPrompt;
@@ -463,6 +629,7 @@ class PopupController {
     on('ai-api-type', 'change', () => {
       this.aiApiPath.value = AIConfig.switchPath(this.aiApiPath.value, this.aiApiType.value);
       if (this.aiApiType.value === 'responses' && this.aiTemperature.value === '0.3') this.aiTemperature.value = '';
+      this.updateTemperatureState();
     });
     on('ai-reasoning-effort', 'change', () => this.updateTemperatureState());
     on('btn-ai-answer', 'click', () => this.aiAnswer());

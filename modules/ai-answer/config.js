@@ -1,6 +1,10 @@
 // Shared configuration for the popup, content scripts and background worker.
 const AIConfig = {
   efforts: ['', 'none', 'low', 'medium', 'high', 'xhigh', 'max'],
+  apiTypes: ['chat_completions', 'responses', 'anthropic_messages', 'gemini_generate_content'],
+  protocolIdentity(config) {
+    return JSON.stringify([config.id || '', config.baseUrl, config.path, config.model, config.apiType]);
+  },
   defaultSystemPrompt: '请准确理解题意；程序题优先沿用答题区现有代码和注释中的步骤。',
   defaultUserPrompt: '请先核对题目要求，再给出适合当前课程知识范围的答案。',
   programmingInstructions: [
@@ -57,16 +61,24 @@ const AIConfig = {
   },
 
   defaultPath(apiType) {
-    return apiType === 'responses' ? '/responses' : '/chat/completions';
+    return { responses: '/responses', anthropic_messages: '/messages',
+      gemini_generate_content: '/models/{model}:{method}' }[apiType] || '/chat/completions';
   },
 
   defaultTemperature(apiType) {
-    return apiType === 'responses' ? null : 0.3;
+    return !apiType || apiType === 'chat_completions' ? 0.3 : null;
+  },
+
+  normalizeClaudeFallback(value) {
+    if (value === undefined || value === null || String(value).trim() === '') return null;
+    const tokens = Number(value);
+    if (!Number.isSafeInteger(tokens) || tokens <= 0) throw new Error('Claude 查询失败时的最大输出 tokens 必须为正整数，或留空');
+    return tokens;
   },
 
   normalize(config = {}) {
     const apiType = config.apiType || 'chat_completions';
-    if (!['chat_completions', 'responses'].includes(apiType)) {
+    if (!this.apiTypes.includes(apiType)) {
       throw new Error('不支持的 AI API 类型');
     }
     const reasoningEffort = config.reasoningEffort ?? '';
@@ -82,9 +94,12 @@ const AIConfig = {
     if (temperature !== null && (!Number.isFinite(temperature) || temperature < 0 || temperature > 2)) {
       throw new Error('温度必须为 0 到 2 之间的数字，或留空');
     }
-    return {
+    const normalized = {
       ...config,
       apiType,
+      apiVersion: (config.apiVersion || '2026-10-21').trim(),
+      workspaceId: (config.workspaceId || '').trim(),
+      claudeFallbackMaxTokens: this.normalizeClaudeFallback(config.claudeFallbackMaxTokens),
       reasoningEffort,
       baseUrl: (config.baseUrl || '').trim().replace(/\/+$/, ''),
       path,
@@ -94,14 +109,17 @@ const AIConfig = {
       userPrompt: typeof config.userPrompt === 'string' ? config.userPrompt : this.defaultUserPrompt,
       temperature
     };
+    // Older profiles may still contain the retired provider selector.
+    delete normalized.provider;
+    return normalized;
   },
 
   switchPath(path, apiType) {
     const trimmed = (path || '').trim().replace(/^\/?/, '/');
-    if (['/', '/chat/completions', '/responses'].includes(trimmed)) {
+    if (['/', ...this.apiTypes.map(type => this.defaultPath(type))].includes(trimmed)) {
       return this.defaultPath(apiType);
     }
-    if (['/v1/chat/completions', '/v1/responses'].includes(trimmed)) {
+    if (this.apiTypes.map(type => `/v1${this.defaultPath(type)}`).includes(trimmed)) {
       return `/v1${this.defaultPath(apiType)}`;
     }
     return path;

@@ -1,4 +1,6 @@
 importScripts('modules/ai-answer/config.js');
+importScripts('modules/ai-answer/protocol.js');
+importScripts('modules/ai-answer/model-query.js');
 importScripts('modules/ai-answer/stream.js');
 
 // Background Service Worker - 处理 API 请求和后台任务
@@ -18,10 +20,10 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === 'AI_API_REQUEST') {
     log.info('Received AI API request');
-    callOpenAICompatibleAPI(request.data)
+    callAIAPI(request.data)
       .then(result => {
         log.info('AI API request successful');
-        sendResponse({ success: true, data: result });
+        sendResponse({ success: true, data: result.text, details: result });
       })
       .catch(error => {
         log.error(`AI API request failed: ${error.message}`);
@@ -49,6 +51,27 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 chrome.runtime.onConnect.addListener(port => {
+  if (port.name === 'AI_MODEL_QUERY') {
+    let controller, finished = false;
+    const complete = message => {
+      if (finished) return;
+      finished = true;
+      try { port.postMessage(message); } catch (_) { /* The editor may have closed. */ }
+    };
+    port.onMessage.addListener(message => {
+      if (message?.type === 'cancel') {
+        controller?.abort();
+        complete({ type: 'cancelled' });
+      }
+      if (message?.type !== 'start' || controller || finished) return;
+      controller = new AbortController();
+      queryModelList(message.config, controller)
+        .then(models => complete({ type: 'done', models }))
+        .catch(error => complete({ type: 'error', message: error.message }));
+    });
+    port.onDisconnect.addListener(() => { finished = true; controller?.abort(); });
+    return;
+  }
   if (!['AI_DIALOGUE_STREAM', 'AI_CHAT_STREAM'].includes(port.name)) return;
   let started = false;
   let finished = false;
@@ -67,15 +90,15 @@ chrome.runtime.onConnect.addListener(port => {
       complete({ type: 'cancelled' });
       return;
     }
-    if (message?.type !== 'start' || started) return;
+    if (message?.type !== 'start' || started || finished) return;
     started = true;
     controller = new AbortController();
     streamDialogueReply(message.messages, message.reasoningEffort, controller, delta => {
       if (!finished) port.postMessage({ type: 'delta', delta });
-    }, port.name === 'AI_CHAT_STREAM' ? delta => {
-      if (!finished) port.postMessage({ type: 'thought', delta });
-    } : undefined, port.name === 'AI_CHAT_STREAM' ? message.profileId : undefined, message.timeoutSeconds)
-      .then(() => complete({ type: 'done' }))
+    }, port.name === 'AI_CHAT_STREAM' ? (delta, metadata) => {
+      if (!finished) port.postMessage({ type: 'thought', delta, ...metadata });
+    } : undefined, port.name === 'AI_CHAT_STREAM' ? message.profileId : undefined, message.timeoutSeconds, message.config)
+      .then(result => complete({ type: 'done', ...result }))
       .catch(error => {
         if (!finished) complete({ type: 'error', message: error.message, retryable: error.retryable === true });
       });
@@ -87,7 +110,7 @@ chrome.runtime.onConnect.addListener(port => {
   });
 });
 
-async function streamDialogueReply(messages, reasoningEffort, controller, onDelta, onThought, profileId, timeoutSeconds) {
+async function streamDialogueReply(messages, reasoningEffort, controller, onDelta, onThought, profileId, timeoutSeconds, requestConfig) {
   if (!Array.isArray(messages) || !messages.length ||
       messages.some(item => !['system', 'user', 'assistant'].includes(item?.role) || !validMessageContent(item))) {
     throw new Error('对话内容无效');
@@ -96,14 +119,14 @@ async function streamDialogueReply(messages, reasoningEffort, controller, onDelt
 
   const data = await chrome.storage.local.get(['aiProfiles', 'activeAiProfileId', 'aiConfig']);
   const profiles = Array.isArray(data.aiProfiles) ? data.aiProfiles : [];
-  const active = profileId
+  const active = requestConfig || (profileId
     ? profiles.find(item => item.id === profileId)
-    : profiles.find(item => item.id === data.activeAiProfileId) || profiles[0] || data.aiConfig;
+    : profiles.find(item => item.id === data.activeAiProfileId) || profiles[0] || data.aiConfig);
   if (profileId && !active) throw new Error('所选模型配置已删除，请重新选择');
   if (!active) throw new Error('请先在插件弹窗配置 AI 模型');
   const config = normalizeApiConfig({ ...active, reasoningEffort });
   if (!config.baseUrl || !config.apiKey || !config.model) throw new Error('当前 AI 模型配置不完整');
-  const apiUrl = new URL(buildApiUrl(config));
+  const apiUrl = new URL(buildApiUrl(config, true));
   if (!['https:', 'http:'].includes(apiUrl.protocol)) throw new Error('AI API 地址必须使用 HTTP 或 HTTPS');
   if (!await chrome.permissions.contains({ origins: [`${apiUrl.origin}/*`] })) {
     throw new Error('尚未授权模型 API 域名，请在插件弹窗重新保存或切换模型以授权');
@@ -117,13 +140,12 @@ async function streamDialogueReply(messages, reasoningEffort, controller, onDelt
     controller.abort();
   }, timeoutSeconds * 1000);
   try {
+    const maxOutputTokens = await AIModelQuery.prepare(config, controller.signal);
+    controller.signal.throwIfAborted();
     const response = await fetch(apiUrl.toString(), {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.apiKey}`
-      },
-      body: JSON.stringify(buildRequestBody(config, messages, true)),
+      headers: AIProtocol.headers(config),
+      body: JSON.stringify(buildRequestBody(config, messages, true, maxOutputTokens)),
       signal: controller.signal
     });
     if (!response.ok) {
@@ -131,7 +153,10 @@ async function streamDialogueReply(messages, reasoningEffort, controller, onDelt
       error.retryable = response.status === 408 || response.status === 429 || response.status >= 500;
       throw error;
     }
-    await AIStream.consume(response.body, config.apiType, onDelta, onThought);
+    const result = response.headers?.get('content-type')?.includes('application/json')
+      ? AIStream.parseResponse(await readJsonResponse(response), config.apiType, onDelta, onThought)
+      : await AIStream.consumeResult(response.body, config.apiType, onDelta, onThought);
+    return responseDetails(config, result);
   } catch (err) {
     if (timedOut) throw retryableError(`AI API 请求超时（${timeoutSeconds} 秒）`);
     if (err instanceof TypeError) err.retryable = true;
@@ -145,16 +170,19 @@ function normalizeApiConfig(config = {}) {
   return AIConfig.normalize(config);
 }
 
-function buildApiUrl(config) {
+function buildApiUrl(config, stream = false) {
   try {
-    const baseUrl = new URL(config.baseUrl);
-    return `${baseUrl.toString().replace(/\/+$/, '')}${config.path}`;
+    return AIProtocol.url(config, stream);
   } catch (err) {
     throw new Error('AI API 地址格式不正确，请检查配置');
   }
 }
 
 async function callOpenAICompatibleAPI(data) {
+  return (await callAIAPI(data)).text;
+}
+
+async function callAIAPI(data) {
   const config = normalizeApiConfig(data.config || data);
 
   if (!config.baseUrl) {
@@ -176,13 +204,12 @@ async function callOpenAICompatibleAPI(data) {
   }, timeoutSeconds * 1000);
   let response;
   try {
+    const maxOutputTokens = await AIModelQuery.prepare(config, controller.signal);
+    controller.signal.throwIfAborted();
     response = await fetch(buildApiUrl(config), {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.apiKey}`
-      },
-      body: JSON.stringify(buildRequestBody(config, data.messages)),
+      headers: AIProtocol.headers(config),
+      body: JSON.stringify(buildRequestBody(config, data.messages, false, maxOutputTokens)),
       signal: controller.signal
     });
 
@@ -192,16 +219,7 @@ async function callOpenAICompatibleAPI(data) {
       throw error;
     }
 
-    let result;
-    try {
-      result = await response.json();
-    } catch (err) {
-      if (err.name === 'AbortError') throw err;
-      const error = new Error('API 返回内容不是合法 JSON');
-      error.retryable = true;
-      throw error;
-    }
-    return extractResponseText(result, config.apiType);
+    return responseDetails(config, AIStream.parseResponse(await readJsonResponse(response), config.apiType));
   } catch (err) {
     if (timedOut) throw retryableError(`AI API 请求超时（${timeoutSeconds} 秒）`);
     if (err instanceof TypeError) err.retryable = true;
@@ -209,6 +227,19 @@ async function callOpenAICompatibleAPI(data) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function readJsonResponse(response) {
+  try { return await response.json(); }
+  catch (err) {
+    if (err.name === 'AbortError') throw err;
+    throw retryableError('API 返回内容不是合法 JSON');
+  }
+}
+
+function responseDetails(config, result) {
+  const { protocolData, ...details } = result;
+  return { ...details, protocolState: AIProtocol.state(config, result) };
 }
 
 function retryableError(message) {
@@ -225,54 +256,24 @@ function validMessageContent(message) {
       (/^https?:\/\//i.test(part.image_url.url) || /^data:image\/(png|jpe?g|gif|webp);base64,/i.test(part.image_url.url))));
 }
 
-function buildRequestBody(config, messages, stream = false) {
-  const body = { model: config.model, stream };
-  if (config.apiType === 'responses') {
-    body.input = messages.map(message => ({ ...message, content: Array.isArray(message.content)
-      ? message.content.map(part => part.type === 'image_url'
-        ? { type: 'input_image', image_url: part.image_url.url }
-        : { type: 'input_text', text: part.text }) : message.content }));
-    body.store = false;
-    if (config.reasoningEffort) body.reasoning = { effort: config.reasoningEffort };
-  } else {
-    body.messages = messages;
-    if (config.reasoningEffort) body.reasoning_effort = config.reasoningEffort;
-  }
-  if (!config.reasoningEffort && config.temperature !== null) {
-    body.temperature = config.temperature;
-  }
-  return body;
+function buildRequestBody(config, messages, stream = false, maxOutputTokens) {
+  return AIProtocol.body(config, messages, stream, maxOutputTokens);
+}
+
+async function queryModelList(requestConfig, controller) {
+  const config = normalizeApiConfig(requestConfig);
+  if (!config.baseUrl || !config.apiKey) throw new Error('请填写 API 地址和密钥');
+  const { timeoutSeconds } = await AIConfig.loadBatchSettings();
+  controller.signal.throwIfAborted();
+  let timedOut = false;
+  const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutSeconds * 1000);
+  try { return await AIModelQuery.list(config, controller.signal); }
+  catch (error) {
+    if (timedOut) throw new Error(`模型查询超时（${timeoutSeconds} 秒）`);
+    throw error;
+  } finally { clearTimeout(timeout); }
 }
 
 function extractResponseText(result, apiType) {
-  if (result?.error) {
-    throw new Error(result.error.message || 'AI API 返回错误');
-  }
-  if (apiType === 'responses') {
-    if (result?.status !== 'completed') {
-      const message = `Responses 请求未完成：${result?.status || '未知状态'}（${result?.incomplete_details?.reason || '未返回完整答案'}）`;
-      throw result?.status === 'failed' ? new Error(message) : retryableError(message);
-    }
-    const parts = [];
-    for (const item of result.output || []) {
-      if (item.type !== 'message') continue;
-      for (const content of item.content || []) {
-        if (content.type === 'refusal') throw new Error(`AI 拒绝回答：${content.refusal || '未提供原因'}`);
-        if (content.type === 'output_text' && typeof content.text === 'string') parts.push(content.text);
-      }
-    }
-    const text = parts.join('');
-    if (!text.trim()) throw retryableError('Responses API 未返回答案文本');
-    return text;
-  }
-  const choice = result?.choices?.[0];
-  if (choice?.message?.refusal) throw new Error(`AI 拒绝回答：${choice.message.refusal}`);
-  if (choice?.finish_reason && choice.finish_reason !== 'stop') {
-    throw retryableError(`Chat Completions 请求未完成：${choice.finish_reason}`);
-  }
-  const content = choice?.message?.content;
-  if (typeof content !== 'string' || !content.trim()) {
-    throw retryableError('API 返回格式不符合 OpenAI Chat Completions 规范，或未返回答案文本');
-  }
-  return content;
+  return AIStream.parseResponse(result, apiType).text;
 }
