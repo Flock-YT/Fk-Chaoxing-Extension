@@ -350,7 +350,30 @@ const AIChat = {
     label.append(state, ' ', spinner, ' ', elapsed);
     const body = document.createElement('pre'); body.textContent = text;
     entry.append(label, body); bubble.box.insertBefore(entry, bubble.body);
-    return { body, entry, label, state, spinner, elapsed };
+    let following = true, lastScrollTop = 0;
+    const trackScroll = () => {
+      if (!entry.open || body.scrollTop === lastScrollTop) return;
+      if (body.scrollTop < lastScrollTop) following = false;
+      else if (body.scrollHeight - body.clientHeight - body.scrollTop <= 2) following = true;
+      lastScrollTop = body.scrollTop;
+    };
+    const scrollToLatest = () => {
+      if (entry.open && following) body.scrollTop = body.scrollHeight;
+      lastScrollTop = body.scrollTop;
+    };
+    body.addEventListener('scroll', trackScroll);
+    entry.addEventListener('toggle', () => {
+      if (!entry.open) return;
+      following = true;
+      scrollToLatest();
+    });
+    const setText = value => {
+      // Capture manual movement even if its scroll event has not been dispatched yet.
+      trackScroll();
+      body.textContent = value;
+      scrollToLatest();
+    };
+    return { body, entry, label, state, spinner, elapsed, setText };
   },
   addBubble(role, text, modelLabel = '', request) {
     this.el('feed').querySelector('.empty-state')?.remove();
@@ -497,8 +520,8 @@ const AIChat = {
     thoughtView.spinner.hidden = false;
     thoughtView.elapsed.hidden = false;
     thoughtView.elapsed.textContent = '0 秒';
-    thoughtView.body.textContent = config.reasoningEffort === 'none'
-      ? '当前选择不思考；若模型仍返回可展示内容，会实时显示在这里。' : '正在等待模型返回思考内容…';
+    thoughtView.setText(config.reasoningEffort === 'none'
+      ? '当前选择不思考；若模型仍返回可展示内容，会实时显示在这里。' : '正在等待模型返回思考内容…');
     return new Promise((resolve, reject) => {
       const startedAt = performance.now();
       let port, finished = false, keepAliveTimer, thoughtTimer, thoughtDurationMs;
@@ -521,7 +544,7 @@ const AIChat = {
         signal.removeEventListener('abort', cancel);
         stopThinking(error);
         if (error) thoughtStatus = error.name === 'AbortError' ? 'cancelled' : 'failed';
-        thoughtView.body.textContent = thought ? thought + (error ? `\n\n${this.thoughtNote(thoughtStatus)}` : '') : this.thoughtNote(thoughtStatus);
+        thoughtView.setText(thought ? thought + (error ? `\n\n${this.thoughtNote(thoughtStatus)}` : '') : this.thoughtNote(thoughtStatus));
         assistant.body.textContent = text;
         port?.disconnect();
         if (error) reject(error); else resolve({ text, thought, thoughtBlocks, thoughtStatus, usage, protocolState, thoughtDurationMs });
@@ -552,7 +575,7 @@ const AIChat = {
             }
             thought = thoughtBlocks.map(item => item.text).join('\n\n');
             thoughtStatus = 'visible';
-            thoughtView.body.textContent = thought;
+            thoughtView.setText(thought);
           }
           if (message.type === 'done') {
             if (typeof message.text === 'string') text = message.text;
