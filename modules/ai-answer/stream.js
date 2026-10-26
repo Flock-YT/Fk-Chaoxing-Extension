@@ -7,6 +7,10 @@ const AIStream = {
     let finishReason = '';
     let contentBuffer = '';
     let inThink = false;
+    const retryableError = message => Object.assign(new Error(message), { retryable: true });
+    const apiError = error => Object.assign(new Error(error.message || 'AI API 返回错误'), {
+      retryable: ['server_error', 'rate_limit_exceeded'].includes(error.code)
+    });
 
     const append = (delta) => {
       if (typeof delta !== 'string' || !delta) return;
@@ -57,10 +61,10 @@ const AIStream = {
       try {
         event = JSON.parse(data);
       } catch (err) {
-        throw new Error('AI 流式响应包含无效 JSON');
+        throw retryableError('AI 流式响应包含无效 JSON');
       }
-      if (event.error) throw new Error(event.error.message || 'AI API 返回错误');
-      if (event.type === 'error') throw new Error(event.message || 'AI API 返回错误');
+      if (event.error) throw apiError(event.error);
+      if (event.type === 'error') throw apiError(event);
 
       if (apiType === 'responses') {
         if (event.type === 'response.output_text.delta') append(event.delta);
@@ -69,9 +73,8 @@ const AIStream = {
         if (event.type === 'response.refusal.delta' || event.type === 'response.refusal.done') {
           throw new Error('AI 拒绝回答');
         }
-        if (event.type === 'response.failed' || event.type === 'response.incomplete') {
-          throw new Error(event.response?.error?.message || event.response?.incomplete_details?.reason || 'Responses 请求未完成');
-        }
+        if (event.type === 'response.failed') throw apiError(event.response?.error || {});
+        if (event.type === 'response.incomplete') throw retryableError(event.response?.incomplete_details?.reason || 'Responses 请求未完成');
         if (event.type === 'response.completed') terminal = true;
       } else {
         const choice = event.choices?.[0];
@@ -94,18 +97,18 @@ const AIStream = {
       finish() {
         if (buffer.trim()) processEvent(buffer);
         if (!terminal || (apiType === 'chat_completions' && finishReason !== 'stop')) {
-          throw new Error('AI 流式响应未正常完成');
+          throw retryableError('AI 流式响应未正常完成');
         }
-        if (inThink) throw new Error('AI 思考内容未正常结束');
+        if (inThink) throw retryableError('AI 思考内容未正常结束');
         append(contentBuffer);
-        if (!text.trim()) throw new Error('AI API 未返回回复文本');
+        if (!text.trim()) throw retryableError('AI API 未返回回复文本');
         return text;
       }
     };
   },
 
   async consume(body, apiType, onDelta, onThought) {
-    if (!body?.getReader) throw new Error('AI API 未返回可读取的数据流');
+    if (!body?.getReader) throw Object.assign(new Error('AI API 未返回可读取的数据流'), { retryable: true });
     const reader = body.getReader();
     const decoder = new TextDecoder();
     const parser = this.createParser(apiType, onDelta, onThought);

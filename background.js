@@ -77,7 +77,7 @@ chrome.runtime.onConnect.addListener(port => {
     } : undefined, port.name === 'AI_CHAT_STREAM' ? message.profileId : undefined)
       .then(() => complete({ type: 'done' }))
       .catch(error => {
-        if (!finished) complete({ type: 'error', message: error.message });
+        if (!finished) complete({ type: 'error', message: error.message, retryable: error.retryable === true });
       });
   });
 
@@ -124,10 +124,15 @@ async function streamDialogueReply(messages, reasoningEffort, controller, onDelt
       body: JSON.stringify(buildRequestBody(config, messages, true)),
       signal: controller.signal
     });
-    if (!response.ok) throw new Error(`AI API 请求失败（${response.status}）：${(await response.text()).slice(0, 500)}`);
+    if (!response.ok) {
+      const error = new Error(`AI API 请求失败（${response.status}）：${(await response.text()).slice(0, 500)}`);
+      error.retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+      throw error;
+    }
     await AIStream.consume(response.body, config.apiType, onDelta, onThought);
   } catch (err) {
-    if (timedOut) throw new Error('AI API 请求超时（180 秒）');
+    if (timedOut) throw retryableError('AI API 请求超时（180 秒）');
+    if (err instanceof TypeError) err.retryable = true;
     throw err;
   } finally {
     clearTimeout(timeout);

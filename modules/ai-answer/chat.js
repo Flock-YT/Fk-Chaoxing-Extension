@@ -1,6 +1,6 @@
 // In-page assistant. The AI-practice conversation in dialogue.js has its own port and state.
 const AIChat = {
-  root: null, questions: [], history: [], pending: null, extracting: false, port: null, selected: new Set(),
+  root: null, questions: [], history: [], pending: null, extracting: false, selected: new Set(),
   frameQuestions: new Map(), remoteWindows: new Map(), replies: new Map(), scanToken: '',
   quickEffort: null, historyKey: '', opening: null, frameId: `${Date.now()}-${Math.random()}`, launcher: null,
   pageKey() { return `aiChat:${location.origin}${location.pathname}${location.search}`; },
@@ -162,13 +162,20 @@ const AIChat = {
       const config = await AIApi.loadConfig();
       const context = this.chosen().map(q => this.snapshot(q));
       const target = this.targets(this.chosen()).map(q => this.snapshot(q));
-      this.el('preview-text').textContent = JSON.stringify(this.messages(config, {
-        input: this.el('input').value.trim(), context, target, preview: true
-      }), null, 2);
+      const settings = await AIConfig.loadBatchSettings();
+      const request = { input: this.el('input').value.trim(), context, target,
+        contextScope: this.el('all').checked ? 'all' : 'selected' };
+      const preview = mode => this.batchRequests({ ...request, mode }, settings.batchSize)
+        .map(batch => ({ questions: this.batchLabel(batch), messages: this.messages(config, batch) }));
+      this.el('preview-text').textContent = JSON.stringify({ ...settings,
+        chat: preview('chat'), answer: target.length ? preview('answer') : [] }, null, 2);
       this.el('question-panel').open = true;
       this.el('preview-panel').open = true;
     };
-    this.el('stop').onclick = () => this.port?.postMessage({ type: 'cancel' });
+    this.el('stop').onclick = () => {
+      this.pending?.controller.abort();
+      this.task('正在停止，已发出的答案提取请求结束后将丢弃结果。');
+    };
     this.el('auto').onchange = async event => chrome.storage.local.set({ autoApplyAnswers: event.target.checked });
     chrome.storage.local.get('autoApplyAnswers').then(data => { this.el('auto').checked = data.autoApplyAnswers === true; });
     chrome.storage.onChanged.addListener(async (changes, area) => {
@@ -238,7 +245,7 @@ const AIChat = {
       target.append(new Option(`${index + 1}. ${q.title.slice(0, 28)}`, String(index)));
     });
     if (Array.from(target.options).some(option => option.value === previousTarget)) target.value = previousTarget;
-    this.el('context-note').textContent = `${this.questions.length} 道题；程序题会附带答题区现有代码，无法读取时会明确标注。`;
+    this.el('context-note').textContent = `${this.questions.length} 道题；请求按总体设置分批；生成答案优先引用当前批次的目标题及限额内的辅助题目。程序题会附带可读取的现有代码。`;
     this.updateContextSummary();
   },
   updateContextSummary() {
@@ -324,6 +331,44 @@ const AIChat = {
     box.append(body); this.el('feed').append(box); box.scrollIntoView({ block: 'end' });
     return { box, body };
   },
+  questionKey(question) { return `${question.index}:${question.id}`; },
+  batchRequests(request, batchSize) {
+    const questions = request.mode === 'answer' ? request.target : request.context;
+    const targetKeys = new Set(request.target.map(q => this.questionKey(q)));
+    const extraContext = request.context.filter(q => !targetKeys.has(this.questionKey(q)));
+    const batches = [];
+    for (let offset = 0; offset < questions.length; offset += batchSize) {
+      const batch = questions.slice(offset, offset + batchSize);
+      const keys = new Set(batch.map(q => this.questionKey(q)));
+      const context = request.mode === 'answer'
+        ? [...batch, ...extraContext.slice(0, batchSize - batch.length)].sort((a, b) => a.index - b.index) : batch;
+      batches.push({ ...request, context, target: request.target.filter(q => keys.has(this.questionKey(q))),
+        contextScope: context.length === request.context.length ? request.contextScope : 'selected' });
+    }
+    return batches.length ? batches : [{ ...request, context: [], target: [] }];
+  },
+  batchLabel(request) {
+    const questions = request.mode === 'answer' ? request.target : request.context;
+    return questions.length ? `第 ${questions[0].index}${questions.length > 1 ? `–${questions.at(-1).index}` : ''} 题` : '对话';
+  },
+  async retryRequest(work, maxRetries, job, label) {
+    const signal = job.controller.signal;
+    for (let attempt = 0; ; attempt++) {
+      signal.throwIfAborted();
+      try { return await work(); }
+      catch (error) {
+        signal.throwIfAborted();
+        if (!error.retryable || attempt >= maxRetries) throw error;
+        this.task(`${label}失败，准备第 ${attempt + 1}/${maxRetries} 次重试：${error.message}`);
+        await new Promise((resolve, reject) => {
+          const cancel = () => { clearTimeout(timer); reject(signal.reason); };
+          const timer = setTimeout(() => { signal.removeEventListener('abort', cancel); resolve(); },
+            1000 * (2 ** attempt) + Math.floor(Math.random() * 250));
+          signal.addEventListener('abort', cancel, { once: true });
+        });
+      }
+    }
+  },
   async send(mode, prior) {
     if (this.pending || this.extracting) return;
     const context = JSON.parse(JSON.stringify(prior?.context || this.chosen().map(q => this.snapshot(q))));
@@ -334,61 +379,141 @@ const AIChat = {
     const config = await AIApi.loadConfig();
     if (this.quickEffort !== null) config.reasoningEffort = this.quickEffort;
     try { AIApi.validateConfig(config); } catch (error) { return this.task(error.message, 'error'); }
+    const settings = await AIConfig.loadBatchSettings();
+    if (this.pending || this.extracting) return;
     const request = { mode, input, context, target, autoApply: prior?.autoApply ?? this.el('auto').checked,
       contextScope: prior?.contextScope || (this.el('all').checked ? 'all' : 'selected'), configId: config.id, regenerate: Boolean(prior) };
-    this.el('status').hidden = true;
-    if (!prior) { this.history.push({ role: 'user', text: input || '请解答所选题目', request }); this.addBubble('user', input || '请解答所选题目', '', request); this.el('input').value = ''; await this.persist(); }
-    const modelLabel = this.modelLabel(config);
-    const assistant = this.addBubble('assistant', '', modelLabel);
-    const thoughtView = this.addThought(assistant, config.reasoningEffort === 'none'
-      ? '当前选择不思考；若模型仍返回可展示内容，会实时显示在这里。'
-      : '正在等待模型返回思考内容…');
-    const thoughtBody = thoughtView.body;
-    this.pending = { request, assistant, thoughtBody, thoughtView, text: '', thought: '' };
+    const history = prior ? this.history.slice(0, this.history.findLastIndex(item => item.role === 'user' && item.request)) : this.history.slice();
+    const batches = this.batchRequests(request, settings.batchSize);
+    const job = { controller: new AbortController(), completed: 0, failures: [], failedQuestions: new Set(), offered: 0, written: 0,
+      applyQueue: Promise.resolve() };
+    this.pending = job;
     this.setBusy(true);
-    const messages = this.messages(config, request);
-    const port = chrome.runtime.connect({ name: 'AI_CHAT_STREAM' }); this.port = port;
-    port.onMessage.addListener(async message => {
-      if (!this.pending || this.port !== port) return;
-      if (message.type === 'delta') { if (!this.pending.text) this.finishThought(this.pending); this.pending.text += message.delta; assistant.body.textContent = this.pending.text; assistant.box.scrollIntoView({ block: 'end' }); }
-      if (message.type === 'thought') {
-        this.pending.thought += message.delta;
-        this.pending.thoughtBody.textContent = this.pending.thought;
-        this.pending.thoughtBody.parentElement.scrollIntoView({ block: 'end' });
+    try {
+      if (!prior) {
+        this.history.push({ role: 'user', text: input || '请解答所选题目', request });
+        this.addBubble('user', input || '请解答所选题目', '', request);
+        this.el('input').value = '';
+        await this.persist();
       }
-      if (message.type === 'done') {
-        this.finishThought(this.pending);
-        const done = this.pending;
-        const shouldExtract = mode === 'answer' || (request.autoApply && request.context.length && request.target.length);
-        this.pending = null; this.port = null; this.extracting = shouldExtract;
-        this.setBusy(shouldExtract, false); port.disconnect();
-        if (!done.thought) done.thoughtBody.textContent = '模型未返回可展示的思考过程。';
-        this.history.push({ role: 'assistant', text: done.text, thought: done.thought,
-          modelLabel, reasoningEffort: config.reasoningEffort }); await this.persist();
-        if (shouldExtract) await this.extractAndOffer(done.text, request, config);
-      }
-      if (message.type === 'error' || message.type === 'cancelled') {
-        this.finishThought(this.pending);
-        this.task(message.type === 'error' ? message.message : '已停止生成', 'error');
-        if (!this.pending.thought) this.pending.thoughtBody.textContent = '本轮未获得思考内容。';
-        this.pending = null; this.port = null; this.setBusy(false); port.disconnect();
-      }
-    });
-    port.onDisconnect.addListener(() => {
-      if (this.port !== port || !this.pending) return;
-      this.finishThought(this.pending);
-      this.task(chrome.runtime.lastError?.message || '流式连接中断，请重试', 'error');
-      this.pending = null; this.port = null; this.setBusy(false);
-    });
-    port.postMessage({ type: 'start', messages, reasoningEffort: config.reasoningEffort, profileId: config.id });
+      this.task(`共 ${batches.length} 批，每批最多引用 ${settings.batchSize} 题，同时处理 ${Math.min(settings.concurrency, batches.length)} 批。`);
+      let nextBatch = 0;
+      const worker = async () => {
+        while (nextBatch < batches.length && !job.controller.signal.aborted) {
+          const batch = batches[nextBatch++];
+          const label = this.batchLabel(batch);
+          const modelLabel = this.modelLabel(config);
+          const assistant = this.addBubble('assistant', '', batches.length > 1 ? `${modelLabel} · ${label}` : modelLabel);
+          const thoughtView = this.addThought(assistant);
+          try {
+            const done = await this.retryRequest(() => this.streamReply(config, batch, history, job, assistant, thoughtView),
+              settings.maxRetries, job, `${label}生成`);
+            this.history.push({ role: 'assistant', text: done.text, thought: done.thought,
+              modelLabel, reasoningEffort: config.reasoningEffort, questionKeys: batch.context.map(q => this.questionKey(q)) });
+            const shouldExtract = mode === 'answer' || (request.autoApply && batch.context.length && batch.target.length);
+            if (shouldExtract) {
+              this.task(`${label}：正在提取可校验答案。`);
+              const entries = await this.retryRequest(() => this.extractAnswers(done.text, batch, config),
+                settings.maxRetries, job, `${label}答案提取`);
+              // API requests can finish out of order; page writes remain serial.
+              const offer = job.applyQueue.then(() => {
+                job.controller.signal.throwIfAborted();
+                return this.offerAnswers(entries, batch, job);
+              });
+              job.applyQueue = offer.catch(() => {});
+              await offer;
+            }
+            job.completed++;
+            this.task(`已完成 ${job.completed}/${batches.length} 批${job.offered ? `，提供 ${job.offered} 道题答案，写入 ${job.written} 道题` : ''}。`);
+          } catch (error) {
+            if (job.controller.signal.aborted) break;
+            job.failures.push(label);
+            thoughtView.entry.open = false;
+            thoughtView.label.textContent = '思考过程';
+            assistant.body.textContent += `\n\n${label}失败：${error.message}`;
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(settings.concurrency, batches.length) }, worker));
+      this.task(`${job.controller.signal.aborted ? '已停止' : '处理结束'}：完成 ${job.completed}/${batches.length} 批` +
+        `${job.offered ? `，提供 ${job.offered} 道题答案，写入 ${job.written} 道题` : ''}` +
+        `${job.failures.length ? `；失败：${job.failures.join('、')}，可重新选择这些题目重试` : ''}` +
+        `${job.failedQuestions.size ? `；第 ${[...job.failedQuestions].join('、')} 题未提供候选答案或写入失败，请刷新题目后重试` : ''}。`,
+        job.failures.length || job.failedQuestions.size ? 'error' : 'info');
+    } catch (error) { this.task(error.message, 'error'); }
+    finally {
+      this.pending = null;
+      this.setBusy(false);
+      await this.persist();
+    }
   },
-  finishThought(pending) { pending.thoughtView.entry.open = false; pending.thoughtView.label.textContent = '思考过程'; },
-  messages(config, request) {
-    const system = AIConfig.buildSystemPrompt(config.systemPrompt);
-    const current = this.requestText(request, config.userPrompt);
-    const lastUser = request.preview ? this.history.length : this.history.findLastIndex(item => item.role === 'user' && item.request);
-    const recent = this.history.slice(Math.max(0, lastUser - 12), lastUser).map(item => ({ role: item.role, content: item.role === 'user' && item.request ? AIApi.withImages(this.requestText(item.request), item.request.context) : item.text }));
-    return [{ role: 'system', content: system }, ...recent, { role: 'user', content: AIApi.withImages(current, request.context) }];
+  streamReply(config, request, history, job, assistant, thoughtView) {
+    const signal = job.controller.signal;
+    signal.throwIfAborted();
+    assistant.body.textContent = '';
+    thoughtView.entry.open = true;
+    thoughtView.label.textContent = '正在思考…';
+    thoughtView.body.textContent = config.reasoningEffort === 'none'
+      ? '当前选择不思考；若模型仍返回可展示内容，会实时显示在这里。' : '正在等待模型返回思考内容…';
+    return new Promise((resolve, reject) => {
+      const port = chrome.runtime.connect({ name: 'AI_CHAT_STREAM' });
+      let finished = false;
+      let text = '', thought = '';
+      const complete = error => {
+        if (finished) return;
+        finished = true;
+        signal.removeEventListener('abort', cancel);
+        thoughtView.entry.open = false;
+        thoughtView.label.textContent = '思考过程';
+        if (!thought) thoughtView.body.textContent = '模型未返回可展示的思考过程。';
+        port.disconnect();
+        if (error) reject(error); else resolve({ text, thought });
+      };
+      const cancel = () => { port.postMessage({ type: 'cancel' }); complete(signal.reason); };
+      signal.addEventListener('abort', cancel, { once: true });
+      port.onMessage.addListener(message => {
+        if (finished) return;
+        if (message.type === 'delta') {
+          thoughtView.entry.open = false;
+          thoughtView.label.textContent = '思考过程';
+          text += message.delta;
+          assistant.body.textContent = text;
+          assistant.box.scrollIntoView({ block: 'end' });
+        }
+        if (message.type === 'thought') {
+          thought += message.delta;
+          thoughtView.body.textContent = thought;
+        }
+        if (message.type === 'done') complete();
+        if (message.type === 'error') complete(Object.assign(new Error(message.message), { retryable: message.retryable === true }));
+        if (message.type === 'cancelled') complete(new DOMException('已停止生成', 'AbortError'));
+      });
+      port.onDisconnect.addListener(() => {
+        if (!finished) complete(Object.assign(new Error(chrome.runtime.lastError?.message || '流式连接中断'), { retryable: true }));
+      });
+      port.postMessage({ type: 'start', messages: this.messages(config, request, history),
+        reasoningEffort: config.reasoningEffort, profileId: config.id });
+    });
+  },
+  messages(config, request, history = this.history) {
+    const keys = new Set(request.context.map(q => this.questionKey(q)));
+    const recent = [];
+    let includeReply = false, includeLegacyReply = false;
+    for (const item of history.slice(-12)) {
+      if (item.role === 'user' && item.request) {
+        const context = item.request.context.filter(q => keys.has(this.questionKey(q)));
+        includeReply = !item.request.context.length || context.length > 0;
+        includeLegacyReply = context.length === item.request.context.length;
+        if (includeReply) {
+          const target = item.request.target.filter(q => keys.has(this.questionKey(q)));
+          recent.push({ role: 'user', content: AIApi.withImages(this.requestText({ ...item.request, context, target }), context) });
+        }
+      } else if (item.questionKeys ? item.questionKeys.every(key => keys.has(key)) : includeReply && includeLegacyReply) {
+        recent.push({ role: item.role, content: item.text });
+      }
+    }
+    return [{ role: 'system', content: AIConfig.buildSystemPrompt(config.systemPrompt) }, ...recent,
+      { role: 'user', content: AIApi.withImages(this.requestText(request, config.userPrompt), request.context) }];
   },
   requestText(request, userPrompt = '') {
     const scope = request.contextScope === 'all' ? '全部题目' : request.context.length === 1 ? '单题' : '勾选多题';
@@ -401,83 +526,82 @@ const AIChat = {
     if (!prior) return this.task('没有可重新生成的请求', 'error');
     await this.send(prior.mode, prior);
   },
-  async extractAndOffer(text, request, config) {
-    this.extracting = true;
-    this.setBusy(true, false);
-    this.task('正在将回复提取为可校验答案，此步骤会产生一次额外请求。');
+  async extractAnswers(text, request, config) {
+    const relatedOnly = request.mode === 'chat';
+    const raw = await AIApi.getAnswers(request.target, config,
+      `本轮用户提问：\n${request.input || '请解答指定题目'}\n\n本轮助手回复：\n${text}`, relatedOnly);
     try {
-      const targets = request.target.map(s => this.questions.find(q => q.index === s.index && q.title === s.title)).filter(Boolean);
-      if (targets.length !== request.target.length) throw new Error('题目已变化，请刷新后重试');
-      const relatedOnly = request.mode === 'chat';
-      const raw = await AIApi.getAnswers(targets, config,
-        `本轮用户提问：\n${request.input || '请解答指定题目'}\n\n本轮助手回复：\n${text}`, relatedOnly);
-      let entries;
-      if (relatedOnly) {
-        const result = JSON.parse(AIApi.stripCodeFence(raw));
-        if (result.related === false || !Array.isArray(result.answers) || !result.answers.length) {
-          this.task('回复未包含可写入的题目答案。'); return;
-        }
-        const indices = result.answers.map(item => Number(item?.questionIndex));
-        if (new Set(indices).size !== indices.length || indices.some(index => !Number.isInteger(index) || index < 1 || index > targets.length)) {
-          throw new Error('AI 返回的题号不完整或重复');
-        }
-        entries = result.answers.map(entry => ({
-          index: Number(entry.questionIndex) - 1,
-          answer: AIApi.parseAnswers(JSON.stringify({ answers: [{ ...entry, questionIndex: 1 }] }), [targets[Number(entry.questionIndex) - 1]])[0]
-        }));
-      } else {
-        entries = AIApi.parseAnswers(raw, targets).map((answer, index) => ({ index, answer }));
+      if (!relatedOnly) return AIApi.parseAnswers(raw, request.target).map((answer, index) => ({ index, answer }));
+      const result = JSON.parse(AIApi.stripCodeFence(raw));
+      if (result.related === false) return [];
+      if (!Array.isArray(result.answers)) throw new Error('AI 未返回可校验答案');
+      const indices = result.answers.map(item => Number(item?.questionIndex));
+      if (new Set(indices).size !== indices.length || indices.some(index => !Number.isInteger(index) || index < 1 || index > request.target.length)) {
+        throw new Error('AI 返回的题号不完整或重复');
       }
-      let written = 0;
-      for (const { index, answer } of entries) {
-        const q = targets[index], snap = request.target[index];
-        const current = q.remote ? q : AIAnswerCore.parseQuestionContainer(q.container, q.docRef, q.sectionHeader);
-        if (!current || current.id !== snap.id || current.title !== snap.title || current.type !== snap.type || !QuestionContainers.sameContext(current, snap) ||
-            JSON.stringify(current.options) !== JSON.stringify(snap.options) ||
-            JSON.stringify(current.existingAnswer) !== JSON.stringify(snap.existingAnswer) ||
-            (snap.type === 'programming' && current.answerDraft !== snap.answerDraft) ||
-            JSON.stringify(current.matchingGroups) !== JSON.stringify(snap.matchingGroups) || this.editorState(q) !== q.editorState) {
-          this.task(`题目 ${q.index} 或答题区已变化，拒绝写入`, 'error'); continue;
-        }
-        const card = document.createElement('div'); card.className = 'candidate';
-        const code = document.createElement('pre'); code.textContent = JSON.stringify(answer, null, 2);
-        const apply = document.createElement('button'); apply.textContent = `写入题目 ${q.index}`;
-        apply.onclick = async () => {
-          apply.disabled = true;
-          try {
-            if (!q.remote) {
-              const fresh = AIAnswerCore.parseQuestionContainer(q.container, q.docRef, q.sectionHeader);
-              if (!fresh || fresh.id !== snap.id || fresh.title !== snap.title || fresh.type !== snap.type ||
-                  JSON.stringify(fresh.options) !== JSON.stringify(snap.options) ||
-                  JSON.stringify(fresh.existingAnswer) !== JSON.stringify(snap.existingAnswer) ||
-                  (snap.type === 'programming' && fresh.answerDraft !== snap.answerDraft) ||
-                  JSON.stringify(fresh.matchingGroups) !== JSON.stringify(snap.matchingGroups) || this.editorState(q) !== q.editorState) {
-                throw new Error('题目或答题区已变化，请刷新后重新生成');
-              }
+      return result.answers.map(entry => ({
+        index: Number(entry.questionIndex) - 1,
+        answer: AIApi.parseAnswers(JSON.stringify({ answers: [{ ...entry, questionIndex: 1 }] }), [request.target[Number(entry.questionIndex) - 1]])[0]
+      }));
+    } catch (error) { error.retryable = true; throw error; }
+  },
+  async offerAnswers(entries, request, job) {
+    for (const { index, answer } of entries) {
+      job.controller.signal.throwIfAborted();
+      const snap = request.target[index];
+      const q = this.questions.find(q => q.index === snap.index && q.id === snap.id && q.title === snap.title);
+      const current = q && (q.remote ? q : AIAnswerCore.parseQuestionContainer(q.container, q.docRef, q.sectionHeader));
+      if (!current || current.id !== snap.id || current.title !== snap.title || current.type !== snap.type || !QuestionContainers.sameContext(current, snap) ||
+          JSON.stringify(current.options) !== JSON.stringify(snap.options) ||
+          JSON.stringify(current.existingAnswer) !== JSON.stringify(snap.existingAnswer) ||
+          (snap.type === 'programming' && current.answerDraft !== snap.answerDraft) ||
+          JSON.stringify(current.matchingGroups) !== JSON.stringify(snap.matchingGroups) || this.editorState(q) !== q.editorState) {
+        job.failedQuestions.add(snap.index);
+        this.task(`题目 ${snap.index} 或答题区已变化，拒绝写入`, 'error'); continue;
+      }
+      const card = document.createElement('div'); card.className = 'candidate';
+      const code = document.createElement('pre'); code.textContent = JSON.stringify(answer, null, 2);
+      const apply = document.createElement('button'); apply.textContent = `写入题目 ${q.index}`;
+      apply.onclick = async () => {
+        apply.disabled = true;
+        try {
+          job.controller.signal.throwIfAborted();
+          if (!q.remote) {
+            const fresh = AIAnswerCore.parseQuestionContainer(q.container, q.docRef, q.sectionHeader);
+            if (!fresh || fresh.id !== snap.id || fresh.title !== snap.title || fresh.type !== snap.type ||
+                JSON.stringify(fresh.options) !== JSON.stringify(snap.options) ||
+                JSON.stringify(fresh.existingAnswer) !== JSON.stringify(snap.existingAnswer) ||
+                (snap.type === 'programming' && fresh.answerDraft !== snap.answerDraft) ||
+                JSON.stringify(fresh.matchingGroups) !== JSON.stringify(snap.matchingGroups) || this.editorState(q) !== q.editorState) {
+              throw new Error('题目或答题区已变化，请刷新后重新生成');
             }
-            const remoteResult = q.remote ? await this.applyRemote(q, snap, answer) : null;
-            const applied = q.remote ? true : await AIAnswerCore.applyAnswerToQuestion(q, answer);
-            if (!applied) throw new Error('未找到可写入的编辑器或答案控件');
-            if (q.remote) {
-              if (remoteResult.question) Object.assign(q, remoteResult.question);
-              q.editorState = remoteResult.editorState;
-            } else {
-              const updated = AIAnswerCore.parseQuestionContainer(q.container, q.docRef, q.sectionHeader);
-              if (updated) Object.assign(q, updated);
-              q.editorState = this.editorState(q);
-            }
-            apply.textContent = '已写入';
-            written += 1;
-            this.task(`已写入 ${written}/${entries.length} 道题`, 'success');
           }
-          catch (error) { apply.disabled = false; this.task(`题目 ${q.index} 写入失败：${error.message}`, 'error'); }
-        };
-        card.append(code, apply); this.el('feed').append(card);
-        if (request.autoApply) await apply.onclick();
-      }
-      if (!request.autoApply) this.task(`已提取 ${entries.length} 道题的答案，可逐题写入。`);
-    } catch (error) { this.task(`答案提取失败：${error.message}`, 'error'); }
-    finally { this.extracting = false; this.setBusy(false); }
+          const remoteResult = q.remote ? await this.applyRemote(q, snap, answer) : null;
+          const applied = q.remote ? true : await AIAnswerCore.applyAnswerToQuestion(q, answer);
+          if (!applied) throw new Error('未找到可写入的编辑器或答案控件');
+          if (q.remote) {
+            if (remoteResult.question) Object.assign(q, remoteResult.question);
+            q.editorState = remoteResult.editorState;
+          } else {
+            const updated = AIAnswerCore.parseQuestionContainer(q.container, q.docRef, q.sectionHeader);
+            if (updated) Object.assign(q, updated);
+            q.editorState = this.editorState(q);
+          }
+          apply.textContent = '已写入';
+          job.failedQuestions.delete(q.index);
+          job.written++;
+          this.task(`已写入 ${job.written} 道题`, 'success');
+        }
+        catch (error) {
+          job.failedQuestions.add(q.index);
+          apply.disabled = false;
+          this.task(`题目 ${q.index} 写入失败：${error.message}`, 'error');
+        }
+      };
+      card.append(code, apply); this.el('feed').append(card);
+      job.offered++;
+      if (request.autoApply) await apply.onclick();
+    }
   },
   task(message, type = 'info') {
     if (!this.root) return;
