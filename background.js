@@ -1,5 +1,6 @@
 importScripts('modules/ai-answer/config.js');
 importScripts('modules/ai-answer/protocol.js');
+importScripts('modules/ai-answer/images.js');
 importScripts('modules/ai-answer/model-query.js');
 importScripts('modules/ai-answer/stream.js');
 
@@ -140,13 +141,15 @@ async function streamDialogueReply(messages, reasoningEffort, controller, onDelt
     timedOut = true;
     controller.abort();
   }, timeoutSeconds * 1000);
+  let preparedMessages;
   try {
     const maxOutputTokens = await AIModelQuery.prepare(config, controller.signal);
+    preparedMessages = await AIImages.prepareMessages(config, messages, controller.signal);
     controller.signal.throwIfAborted();
     const response = await fetch(apiUrl.toString(), {
       method: 'POST',
       headers: AIProtocol.headers(config),
-      body: JSON.stringify(buildRequestBody(config, messages, true, maxOutputTokens)),
+      body: JSON.stringify(buildRequestBody(config, preparedMessages, true, maxOutputTokens)),
       signal: controller.signal
     });
     if (!response.ok) {
@@ -161,6 +164,7 @@ async function streamDialogueReply(messages, reasoningEffort, controller, onDelt
     if (err instanceof TypeError) err.retryable = true;
     throw err;
   } finally {
+    preparedMessages = null;
     clearTimeout(timeout);
   }
 }
@@ -202,13 +206,15 @@ async function callAIAPI(data) {
     controller.abort();
   }, timeoutSeconds * 1000);
   let response;
+  let preparedMessages;
   try {
     const maxOutputTokens = await AIModelQuery.prepare(config, controller.signal);
+    preparedMessages = await AIImages.prepareMessages(config, data.messages, controller.signal);
     controller.signal.throwIfAborted();
     response = await fetch(buildApiUrl(config), {
       method: 'POST',
       headers: AIProtocol.headers(config),
-      body: JSON.stringify(buildRequestBody(config, data.messages, false, maxOutputTokens)),
+      body: JSON.stringify(buildRequestBody(config, preparedMessages, false, maxOutputTokens)),
       signal: controller.signal
     });
 
@@ -222,6 +228,7 @@ async function callAIAPI(data) {
     if (err instanceof TypeError) err.retryable = true;
     throw err;
   } finally {
+    preparedMessages = null;
     clearTimeout(timeout);
   }
 }

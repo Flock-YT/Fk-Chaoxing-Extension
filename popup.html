@@ -131,10 +131,20 @@
           <div class="setting-field">
             <label for="ai-timeout-seconds">请求超时（秒）</label>
             <input id="ai-timeout-seconds" class="form-control" type="number" min="1" step="1" inputmode="numeric">
-            <p>默认 300 秒，包含模型思考和输出的总时长，对所有模型生效。</p>
+            <p>默认 300 秒，包含图片读取、模型思考和输出的总时长，对所有模型生效。</p>
           </div>
           <p id="batch-settings-error" class="field-error" role="alert" hidden></p>
           <button id="btn-batch-save" class="btn btn-primary" type="button">保存答题设置</button>
+        </div>
+        <div class="settings-group">
+          <div class="settings-group-heading"><h3>图片访问权限</h3></div>
+          <div class="form-group">
+            <label for="ai-image-site">图片网站地址</label>
+            <input id="ai-image-site" class="form-control" type="url" placeholder="https://images.example.com" autocomplete="off">
+            <p class="settings-caption">Gemini 会先读取图片内容再发送。若提示图片网站未授权，请填写提示中的地址，授权后回到页面重试。</p>
+          </div>
+          <button id="btn-image-site-authorize" class="btn btn-outline" type="button">授权访问图片网站</button>
+          <p id="image-site-status" class="settings-caption" role="status" aria-live="polite" hidden></p>
         </div>
         <button id="btn-models-open" class="settings-link" type="button">
           <span class="settings-link-icon">AI</span>

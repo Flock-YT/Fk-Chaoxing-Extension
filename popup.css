@@ -99,6 +99,12 @@ body {
   gap: 16px;
 }
 
+.settings-group + .settings-group {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
 .settings-group-heading {
   display: flex;
   align-items: center;

@@ -425,6 +425,29 @@ class PopupController {
     if (!await chrome.permissions.request({ origins: [origin] })) throw new Error(`未授权访问 ${origin}`);
   }
 
+  async authorizeImageSite() {
+    const button = document.getElementById('btn-image-site-authorize');
+    const status = document.getElementById('image-site-status');
+    button.disabled = true;
+    status.hidden = true;
+    try {
+      let url;
+      try { url = new URL(document.getElementById('ai-image-site').value.trim()); }
+      catch (_) { throw new Error('请填写完整的 HTTP 或 HTTPS 图片网站地址'); }
+      if (!['http:', 'https:'].includes(url.protocol)) throw new Error('图片网站地址必须使用 HTTP 或 HTTPS');
+      // Request directly from the click handler, before any asynchronous work.
+      if (!await chrome.permissions.request({ origins: [`${url.origin}/*`] })) throw new Error(`未授权访问 ${url.origin}，图片请求不会继续`);
+      status.className = 'settings-caption';
+      status.textContent = `已授权 ${url.origin}，请回到页面重试。`;
+    } catch (error) {
+      status.className = 'field-error';
+      status.textContent = error.message;
+    } finally {
+      status.hidden = false;
+      button.disabled = false;
+    }
+  }
+
   async testAiConnection() {
     const button = document.getElementById('btn-ai-config-test');
     button.disabled = true;
@@ -585,6 +608,8 @@ class PopupController {
     on('btn-model-editor-back', 'click', () => this.navigate('models'));
     on('btn-ai-profile-new', 'click', () => this.openEditor());
     on('btn-batch-save', 'click', () => this.saveBatchSettings());
+    on('btn-image-site-authorize', 'click', () => this.authorizeImageSite());
+    on('ai-image-site', 'input', () => { document.getElementById('image-site-status').hidden = true; });
     ['ai-batch-size', 'ai-concurrency', 'ai-max-retries', 'ai-timeout-seconds'].forEach(id => {
       on(id, 'input', () => { document.getElementById('batch-settings-error').hidden = true; });
     });

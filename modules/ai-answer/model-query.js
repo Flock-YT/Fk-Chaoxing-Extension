@@ -97,6 +97,7 @@ const AIModelQuery = {
         const items = gemini ? result.models : result.data;
         if (!Array.isArray(items) && !(gemini && items === undefined)) throw new Error('模型查询返回的列表格式不正确');
         for (const item of items || []) {
+          if (gemini && Array.isArray(item.supportedGenerationMethods) && !item.supportedGenerationMethods.includes('generateContent')) continue;
           const rawId = gemini ? item.name : item.id;
           if (typeof rawId !== 'string' || !rawId.trim()) continue;
           const id = gemini ? rawId.replace(/^models\//, '') : rawId;

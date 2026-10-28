@@ -2,7 +2,7 @@
 const AIChat = {
   root: null, questions: [], history: [], contextQuestions: [], lastReferenceKeys: [], discussionMode: false, pending: null, selected: new Set(),
   lastUsage: null, contextError: null, currentConfig: null, contextInfo: null, infoPort: null, infoRevision: 0,
-  frameQuestions: new Map(), remoteWindows: new Map(), replies: new Map(), scanToken: '',
+  frameQuestions: new Map(), frameApplies: new Map(), remoteWindows: new Map(), replies: new Map(), scanToken: '',
   quickEffort: null, historyKey: '', opening: null, frameId: `${Date.now()}-${Math.random()}`, launcher: null,
   pageKey() { return `aiChat:${location.origin}${location.pathname}${location.search}`; },
   el(id) { return this.root?.getElementById(id); },
@@ -288,6 +288,7 @@ const AIChat = {
   },
   snapshot(q) {
     return { id: q.id, index: q.index, type: q.type, title: q.title, options: q.options, blankCount: q.blankCount,
+      exam: q.exam,
       parentTitle: q.parentTitle, parentId: q.parentId, subquestionId: q.subquestionId, images: q.images, parentImages: q.parentImages,
       subquestionNumber: q.subquestionNumber,
       existingAnswer: q.existingAnswer,
@@ -656,7 +657,9 @@ const AIChat = {
         `${job.offered ? `，提供 ${job.offered} 道题答案，写入 ${job.written} 道题` : ''}` +
         `${job.failures.length ? `；失败：${job.failures.join('、')}，可重新选择这些题目重试` : ''}` +
         `${job.unansweredQuestions.size ? `；第 ${[...job.unansweredQuestions].join('、')} 题在聊天中未确定答案，未填写` : ''}` +
-        `${job.failedQuestions.size ? `；第 ${[...job.failedQuestions].join('、')} 题写入失败，请刷新题目后重试` : ''}。`,
+        `${job.saved ? `，其中 ${job.saved} 题已填写并暂存` : ''}` +
+        `${job.applyError ? `；已暂停后续填写：${job.applyError.message}` : ''}` +
+        `${job.failedQuestions.size ? `；第 ${[...job.failedQuestions].join('、')} 题${job.applyError ? '暂存未确认' : '写入失败'}，请刷新题目后重试` : ''}。`,
         job.failures.length || job.failedQuestions.size ? 'error' : 'info');
     } catch (error) { this.task(error.message, 'error'); }
     finally {
@@ -860,8 +863,10 @@ const AIChat = {
               throw new Error('题目或答题区已变化，请刷新后重新生成');
             }
           }
-          const remoteResult = q.remote ? await this.applyRemote(q, snap, answer) : null;
-          const applied = q.remote ? true : await AIAnswerCore.applyAnswerToQuestion(q, answer);
+          const options = { signal: job.controller.signal, timeoutSeconds: job.timeoutSeconds };
+          const remoteResult = q.remote ? await this.applyRemote(q, snap, answer, options) : null;
+          const applied = q.remote ? true : await AIAnswerCore.applyAnswerToQuestion(q, answer, options);
+          job.controller.signal.throwIfAborted();
           if (!applied) throw new Error('未找到可写入的编辑器或答案控件');
           if (q.remote) {
             if (remoteResult.question) Object.assign(q, remoteResult.question);
@@ -871,14 +876,19 @@ const AIChat = {
             if (updated) Object.assign(q, updated);
             q.editorState = this.editorState(q);
           }
-          apply.textContent = '已写入';
+          apply.textContent = q.exam ? '已填写并暂存' : '已写入';
+          if (q.exam) job.saved = (job.saved || 0) + 1;
           job.failedQuestions.delete(q.index);
           job.written++;
-          this.task(`已写入 ${job.written} 道题`, 'success');
+          this.task(`已写入 ${job.written} 道题${job.saved ? `，其中 ${job.saved} 题已填写并暂存` : ''}`, 'success');
         }
         catch (error) {
           job.failedQuestions.add(q.index);
-          apply.disabled = false;
+          if (error.examSaveError) {
+            apply.textContent = '暂存未确认';
+            job.applyError = error;
+            job.controller.abort();
+          } else apply.disabled = false;
           this.task(`题目 ${q.index} 写入失败：${error.message}`, 'error');
         }
       };
@@ -955,15 +965,27 @@ const AIChat = {
     this.el('refresh').disabled = value;
     this.el('stop').hidden = !value;
   },
-  applyRemote(q, snap, answer) {
+  async applyRemote(q, snap, answer, { signal, timeoutSeconds } = {}) {
     const target = this.remoteWindows.get(q.remote);
     if (!target) return Promise.reject(new Error('题目所在页面已失效'));
     const id = `${Date.now()}-${Math.random()}`;
+    timeoutSeconds ??= (await AIConfig.loadBatchSettings()).timeoutSeconds;
+    signal?.throwIfAborted();
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.replies.delete(id); reject(new Error('iframe 写入超时')); }, 3000);
-      this.replies.set(id, result => { clearTimeout(timer); result.ok ? resolve(result) : reject(new Error(result.error)); });
+      const cleanup = () => { clearTimeout(timer); this.replies.delete(id); signal?.removeEventListener('abort', cancel); };
+      const cancel = () => {
+        cleanup();
+        target.source.postMessage({ fkAiChat: 'cancelApply', token: this.scanToken, id }, target.origin);
+        reject(signal?.reason || Object.assign(new Error('iframe 填写或暂存超时'), { examSaveError: Boolean(q.exam) }));
+      };
+      const timer = setTimeout(cancel, AIConfig.normalizeTimeoutSeconds(timeoutSeconds) * 1000);
+      signal?.addEventListener('abort', cancel, { once: true });
+      this.replies.set(id, result => {
+        cleanup();
+        result.ok ? resolve(result) : reject(Object.assign(new Error(result.error), { examSaveError: result.examSaveError }));
+      });
       target.source.postMessage({ fkAiChat: 'apply', token: this.scanToken, id, questionId: q.remote, snap,
-        editorState: q.editorState, answer }, target.origin);
+        editorState: q.editorState, answer, timeoutSeconds }, target.origin);
     });
   },
   onFrameMessage(event) {
@@ -990,7 +1012,11 @@ const AIChat = {
         this.questions.push(item);
       }
       if (this.root) this.renderQuestions();
-    } else if (msg.fkAiChat === 'apply' && window !== window.top && msg.token === this.scanToken) {
+    } else if (msg.fkAiChat === 'cancelApply' && window !== window.top && msg.token === this.scanToken && event.source === window.top) {
+      this.frameApplies.get(msg.id)?.abort();
+    } else if (msg.fkAiChat === 'apply' && window !== window.top && msg.token === this.scanToken && event.source === window.top) {
+      const controller = new AbortController();
+      this.frameApplies.set(msg.id, controller);
       const q = this.frameQuestions.get(msg.questionId);
       const current = q && AIAnswerCore.parseQuestionContainer(q.container, q.docRef, q.sectionHeader);
       const s = msg.snap;
@@ -1002,8 +1028,10 @@ const AIChat = {
         this.editorState(q) === msg.editorState;
       Promise.resolve().then(() => {
         if (!same) throw new Error('题目或答题区已变化');
-        return AIAnswerCore.applyAnswerToQuestion(q, msg.answer);
+        controller.signal.throwIfAborted();
+        return AIAnswerCore.applyAnswerToQuestion(q, msg.answer, { signal: controller.signal, timeoutSeconds: msg.timeoutSeconds });
       }).then(ok => {
+        controller.signal.throwIfAborted();
         if (ok) {
           const updated = AIAnswerCore.parseQuestionContainer(q.container, q.docRef, q.sectionHeader);
           if (updated) Object.assign(q, updated);
@@ -1012,7 +1040,8 @@ const AIChat = {
         window.top.postMessage({ fkAiChat: 'applied', id: msg.id, ok: Boolean(ok), error: ok ? '' : '无可写入控件',
           question: ok ? this.snapshot({ ...q, index: s.index }) : null,
           editorState: ok ? q.editorState : undefined }, event.origin);
-      }).catch(error => window.top.postMessage({ fkAiChat: 'applied', id: msg.id, ok: false, error: error.message }, event.origin));
+      }).catch(error => window.top.postMessage({ fkAiChat: 'applied', id: msg.id, ok: false, error: error.message,
+        examSaveError: error.examSaveError }, event.origin)).finally(() => this.frameApplies.delete(msg.id));
     } else if (msg.fkAiChat === 'applied' && window === window.top) {
       this.replies.get(msg.id)?.(msg); this.replies.delete(msg.id);
     }

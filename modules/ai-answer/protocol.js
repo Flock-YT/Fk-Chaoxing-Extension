@@ -90,12 +90,15 @@ const AIProtocol = {
     if (apiType === 'responses') {
       body.input = messages.flatMap(message => {
         const saved = this.savedState(message, config);
-        if (saved) return saved;
-        return [{ role: message.role, content: Array.isArray(message.content)
+        const replay = saved ? saved.filter(item => item.type !== 'reasoning' ||
+          (typeof item.encrypted_content === 'string' && item.encrypted_content.trim())) : [];
+        if (replay.some(item => item.type === 'message')) return replay;
+        return [...replay, { role: message.role, content: Array.isArray(message.content)
           ? message.content.map(part => part.type === 'image_url'
             ? { type: 'input_image', image_url: part.image_url.url } : { type: 'input_text', text: part.text }) : message.content }];
       });
       body.store = false;
+      body.include = ['reasoning.encrypted_content'];
       body.reasoning = { summary: 'auto', ...(config.reasoningEffort ? { effort: config.reasoningEffort } : {}) };
     } else {
       if (stream) body.stream_options = { include_usage: true };
